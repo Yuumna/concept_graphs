@@ -26,9 +26,9 @@ class my_dataset(Dataset):
             self.train_image_paths = []
             for config in configs:
                 if config == "000" and alpha != 1500 and remove_node != "100":  
-                    path_pattern = f"input/{dataset}/train_{remove_node}/{prefix}_000_*{ext}" 
+                    path_pattern = f"/work/dlclarge2/aliy-maskgit/datasets/{dataset}/train_{remove_node}/{prefix}_000_*{ext}" 
                 else: 
-                    path_pattern = f"working/{dataset}/train/{prefix}_{config}_*{ext}"
+                    path_pattern = f"/work/dlclarge2/aliy-maskgit/datasets/{dataset}/train/{prefix}_{config}_*{ext}"
                 new_paths = glob.glob(path_pattern)
         
                 if remove_node == config:
@@ -37,7 +37,7 @@ class my_dataset(Dataset):
                 self.train_image_paths.extend(new_paths)
             self.len_data = len(self.train_image_paths)
         else:
-            self.test_image_paths = glob.glob(f"input/{dataset}/test/{prefix}_{configs}_*{ext}")
+            self.test_image_paths = glob.glob(f"/work/dlclarge2/aliy-maskgit/datasets/{dataset}/test/{prefix}_{configs}_*{ext}")
             self.len_data = len(self.test_image_paths)
 
 
@@ -53,7 +53,7 @@ class my_dataset(Dataset):
            ipath = random.randint(0, len(self.test_image_paths)-1)
            img_path = self.test_image_paths[ipath]
             
-       img = Image.open(img_path) #.convert('RGB')
+       img = Image.open(img_path).convert('RGB')
        if self.transform is not None:
            img = self.transform(img)
    
