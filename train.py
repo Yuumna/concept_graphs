@@ -586,7 +586,7 @@ def training(args):
     now = datetime.datetime.now().strftime("%d-%m-%H-%M")
     save_dir = './output/'+dataset+'/' + experiment+'/'
     if not os.path.isdir(save_dir): os.makedirs(save_dir)
-    save_dir = save_dir +str(now) + "_"+ str + str(num_samples) + "_" + str(test_size) + "_" + str(n_feat) + "_" + str(n_T) + "_" + str(n_epoch) \
+    save_dir = save_dir +str(now) + "_" + str(num_samples) + "_" + str(test_size) + "_" + str(n_feat) + "_" + str(n_T) + "_" + str(n_epoch) \
                         + "_" + str(lrate) + "_" + remove_node + "_" + str(alpha) + "_" + str(beta) + "_" + str(seed) + "/" #+ str(type_attention) + "/"
     if not os.path.isdir(save_dir): os.makedirs(save_dir)
 

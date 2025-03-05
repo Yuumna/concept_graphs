@@ -14,7 +14,7 @@ import json
 
 
 class my_dataset(Dataset):
-    def __init__(self, transform=None, num_samples=5000, dataset="", configs="", training=True, test_size=None, alpha=1.0, beta=2.0, remove_node=None, flag_double=1):
+    def __init__(self, transform=None, num_samples=5000, dataset="", configs="", training=True, test_size=None, alpha=1.0, beta=2.0, remove_node=None, flag_double=1, our_labels=None):
         self.training = training
         self.test_size = test_size
         self.dataset = dataset
@@ -43,6 +43,7 @@ class my_dataset(Dataset):
 
         self.num_samples = num_samples
         self.transform = transform
+        self.our_labels = our_labels
 
 
     def __getitem__(self, index):
@@ -83,7 +84,14 @@ class my_dataset(Dataset):
            color = np.array(color, dtype=np.float32)
        
            # Create the label dictionary
-           label = {0: int(name_labels[0]), 1: color, 2: size}
+           if not self.our_labels:
+               label = {0: int(name_labels[0]), 1: color, 2: size}
+           else:
+               #label = (int(name_labels[0]),int(name_labels[1]),int(name_labels[2])) # first try 
+               color = np.array(int(name_labels[1]), dtype=np.float32)
+               size = np.array( int(name_labels[2]), dtype=np.float32)
+               label = {0: int(name_labels[0]), 1: color, 2: size} # second try
+        
        
        elif "celeba" in self.dataset:
            label = {i: int(name_labels[i]) for i in range(3)}

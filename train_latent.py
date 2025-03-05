@@ -37,10 +37,12 @@ parser.add_argument('--n_feat', default=256, type=int)
 parser.add_argument('--n_sample', default=64, type=int)
 parser.add_argument('--n_epoch', default=100, type=int)
 parser.add_argument('--experiment', default="H32-train1", type=str)
+parser.add_argument("--label", default="None", type=str)
 parser.add_argument('--remove_node', default="None", type=str)
 parser.add_argument('--type_attention', default="", type=str)
 parser.add_argument('--pixel_size', default=28, type=int)
 parser.add_argument('--dataset', default="single-body_2d_3classes", type=str)
+parser.add_argument('--our_labels', default= False, type=bool)
 parser.add_argument('--scheduler', default="", type=str)
 parser.add_argument('--seed', type=int, default=1)
 parser.add_argument('--token_folder', type=str, default="/work/dlclarge2/aliy-maskgit/maskgit/image_tokenization/vqgan_logs/2025-02-13T13-25-14_codebook_Third_synthetic_DLC13913381")#2025-02-13T18-09-06_codebook_10244_synthetic_DLC25267020")
@@ -555,9 +557,11 @@ def training(args):
     beta = args.beta
     test_size = args.test_size
     dataset = args.dataset 
+    our_labels = args.our_labels
     num_samples = args.num_samples 
     pixel_size = args.pixel_size
     experiment = args.experiment 
+    label = args.label
     n_sample = args.n_sample 
     type_attention = args.type_attention 
     remove_node = args.remove_node 
@@ -605,9 +609,10 @@ def training(args):
 
     # log the timestamp
     now = datetime.datetime.now().strftime("%d-%m-%H-%M")
-    save_dir = './output/'+dataset+'/'+"latent_" + experiment+'/'
+    save_dir = './output/'+dataset+'/'+"latent_" +label+'/'+ experiment+'/'
     if not os.path.isdir(save_dir): os.makedirs(save_dir)
-    save_dir = save_dir +str(now) + "_"+ str + str(num_samples) + "_" + str(test_size) + "_" + str(n_feat) + "_" + str(n_T) + "_" + str(n_epoch) \
+    
+    save_dir = save_dir +str(now) + "_"+ str(num_samples) + "_" + str(test_size) + "_" + str(n_feat) + "_" + str(n_T) + "_" + str(n_epoch) \
                         + "_" + str(lrate) + "_" + remove_node + "_" + str(alpha) + "_" + str(beta) + "_" + str(seed) + "/" #+ str(type_attention) + "/"
     if not os.path.isdir(save_dir): os.makedirs(save_dir)
     ddpm = DDPM(nn_model=ContextUnet(in_channels=in_channels, n_feat=n_feat, n_classes=n_classes, dataset=dataset, type_attention=type_attention), 
@@ -615,7 +620,7 @@ def training(args):
     ddpm.to(device)
 
 
-    train_dataset = load_dataset.my_dataset(tf, num_samples, dataset, configs=configs["train"], training=True, alpha=alpha, remove_node=remove_node)
+    train_dataset = load_dataset.my_dataset(tf, num_samples, dataset, configs=configs["train"], training=True, alpha=alpha, remove_node=remove_node, our_labels=our_labels)
     train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=1)
 
 
@@ -641,7 +646,6 @@ def training(args):
         for x, c in pbar:
             optim.zero_grad()
             x = x.to(device)
-            #F.pad
             _c = [tmpc.to(device) for tmpc in c.values()]
             emb, _, [_, _, code] = vqgan.encode(x)
             emb = F.pad(emb, (1, 0, 1, 0), value=0)
