@@ -398,7 +398,6 @@ class ContextUnet(nn.Module):
         #print(f"hiddenvec shape: {hiddenvec.shape}")
         temb1 = self.timeembed1(t).view(-1, int(self.n_feat), 1, 1)
         temb2 = self.timeembed2(t).view(-1, int(self.n_feat/2), 1, 1)
-
         # embed context, time step
         cemb1 = 0
         cemb2 = 0
@@ -508,7 +507,6 @@ class DDPM(nn.Module):
         x_i_store = np.array(x_i_store)
         return x_i, x_i_store
 
-
     def ddim_step(self, x_t, t, noise_pred):
         """
         DDIM step to predict the next state of the image.
@@ -545,7 +543,18 @@ class DDPM(nn.Module):
         x_i_store = np.array(x_i_store)
         return x_t, x_i_store
 
-    
+    def forward_diff(self, x, t):
+        """
+        this method is used in training, so samples t and noise randomly
+        """
+        #t is in range 0 to 1 convert it to 1 to n_T
+        _ts = (t * self.n_T).long().to(self.device)
+        noise = torch.randn_like(x)  # eps ~ N(0, 1)
+
+        x_t = (
+            self.sqrtab[_ts, None, None, None] * x
+            + self.sqrtmab[_ts, None, None, None] * noise
+        )  
 
 def training(args):
 
@@ -647,10 +656,13 @@ def training(args):
         for x, c in pbar:
             optim.zero_grad()
             x = x.to(device)
+
+            x = 2 * x - 1
             _c = [tmpc.to(device) for tmpc in c.values()]
             with torch.no_grad():
                 emb, _, [_, _, code] = vqgan.encode(x)
                 emb = F.pad(emb, (1, 0, 1, 0), value=0)
+            
             loss = ddpm(emb, _c)
             log_dict['train_loss_per_batch'].append(loss.item())
             loss.backward()
@@ -675,17 +687,24 @@ def training(args):
                 for test_config in output_configs: 
                     x_real, c_gen = next(iter(test_dataloaders[test_config]))
                     x_real = x_real[:n_sample].to(device)
+                    x_real = 2 * x_real - 1
+                    x_real_emb, _, [_, _, code] = vqgan.encode(x_real)
+                    x_real_emb = F.pad(x_real_emb, (1, 0, 1, 0), value=0)
+                    x_real_ae_gen = vqgan.decode(x_real_emb[...,1:,1:])
+                    x_real_ae_gen = x_real_ae_gen[0] if isinstance(x_real_ae_gen, tuple) else x_real_ae_gen
+                    np.savez_compressed(save_dir + f"real_"+test_config+"_ep"+str(ep)+".npz", x_real=x_real.detach().cpu().numpy())
+                    np.savez_compressed(save_dir + f"real_ae_gen_"+test_config+"_ep"+str(ep)+".npz", x_real_ae_gen=x_real_ae_gen.detach().cpu().numpy())
+                    print('saved real image at ' + save_dir + f"real_"+test_config+"_ep"+str(ep)+".png")
+                    print('saved real ae gen image at ' + save_dir + f"real_ae_gen_"+test_config+"_ep"+str(ep)+".png")
                     if scheduler=="DDIM":
                         x_tok, x_gen_store = ddpm.sample_ddim(n_sample, c_gen, (in_channels, 8, 8), device)
                         # how to remove by index the last element of x_gen F.pad(emb_test, (1, 0, 1, 0), value=0)
                         x_gen = vqgan.decode(x_tok[...,1:,1:])
                         x_gen = x_gen[0] if isinstance(x_gen, tuple) else x_gen  # if dino loss is included
-                        x_gen = 2 * x_gen - 1
                     else:
                         x_tok, x_gen_store = ddpm.sample(n_sample, c_gen, (in_channels, 8, 8), device, guide_w=0.0)
                         x_gen = vqgan.decode(x_tok[...,1:,1:])
                         x_gen = x_gen[0] if isinstance(x_gen, tuple) else x_gen  # if dino loss is included
-                        x_gen = 2 * x_gen - 1
                     np.savez_compressed(save_dir + f"image_"+test_config+"_ep"+str(ep)+".npz", x_gen=x_gen.detach().cpu().numpy()) 
                     print('saved image at ' + save_dir + f"image_"+test_config+"_ep"+str(ep)+".png")
 

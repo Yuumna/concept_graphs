@@ -88,8 +88,8 @@ class my_dataset(Dataset):
                label = {0: int(name_labels[0]), 1: color, 2: size}
            else:
                #label = (int(name_labels[0]),int(name_labels[1]),int(name_labels[2])) # first try 
-               color = np.array(int(name_labels[1]), dtype=np.float32)
-               size = np.array( int(name_labels[2]), dtype=np.float32)
+               color = np.array(int(name_labels[1]), dtype=np.int64)
+               size = np.array( int(name_labels[2]), dtype=np.int64)
                label = {0: int(name_labels[0]), 1: color, 2: size} # second try
         
        

@@ -25,10 +25,10 @@ class my_dataset(Dataset):
         if training:
             self.train_image_paths = []
             for config in configs:
-                new_paths = glob.glob(dataset+"/*/CLEVR_"+config+"_*.png")
+                new_paths = glob.glob("/work/dlclarge2/aliy-maskgit/datasets/" + dataset+"/*/CLEVR_"+config+"_*.png")
                 self.train_image_paths += new_paths
         else:
-            self.test_image_paths = glob.glob(dataset+"/test/CLEVR_"+configs+"_*.png")
+            self.test_image_paths = glob.glob("/work/dlclarge2/aliy-maskgit/datasets/"+dataset+"/test/CLEVR_"+configs+"_*.png")
 
         if self.training: 
            self.len_data = len(self.train_image_paths) - 1
@@ -47,7 +47,7 @@ class my_dataset(Dataset):
            ipath = random.randint(0, len(self.test_image_paths)-1)
            img_path = self.test_image_paths[ipath]
             
-       img = Image.open(img_path) #.convert('RGB')
+       img = Image.open(img_path).convert('RGB')
        if self.transform is not None:
            img = self.transform(img)
         

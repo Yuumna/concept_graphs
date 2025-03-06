@@ -339,16 +339,35 @@ class EmbedFC(nn.Module):
     def forward(self, x):
         x = x.view(-1, self.input_dim)
         return self.model(x)
+    
+
+# class EmbedFCID(nn.Module):
+#     def __init__(self, input_dim, emb_dim):
+#         super(EmbedFCID, self).__init__()
+#         '''
+#         generic one layer FC NN for embedding things  
+#         '''
+#         self.input_dim = input_dim
+#         layers = [
+#             nn.Embedding(input_dim, emb_dim),
+#             nn.GELU(),
+#             nn.Linear(emb_dim, emb_dim),
+#         ]
+#         self.model = nn.Sequential(*layers)
+
+#     def forward(self, x):
+#         return self.model(x)
 
 
 class ContextUnet(nn.Module):
-    def __init__(self, in_channels, n_feat = 256, n_classes=10, dataset="", type_attention=""):
+    def __init__(self, in_channels, n_feat = 256, n_classes=10, dataset="", type_attention="", discrete_classes=False):
         super(ContextUnet, self).__init__()
 
         self.in_channels = in_channels
         self.n_contexts = len(n_classes)
         self.n_feat = 2 * n_feat
         self.n_classes = n_classes
+        self.discrete_classes = discrete_classes
 
         self.init_conv = ResidualConvBlock(in_channels, n_feat, is_res=True)
 
@@ -365,6 +384,10 @@ class ContextUnet(nn.Module):
         self.n_out1 = 2*n_feat 
         self.n_out2 = n_feat
 
+        # if self.discrete_classes:
+        #     self.contextembed1 = nn.ModuleList([EmbedFCID(self.n_classes[iclass], self.n_out1) for iclass in range(len(self.n_classes))])
+        #     self.contextembed2 = nn.ModuleList([EmbedFCID(self.n_classes[iclass], self.n_out2) for iclass in range(len(self.n_classes))])
+        # else:
         self.contextembed1 = nn.ModuleList([EmbedFC(self.n_classes[iclass], self.n_out1) for iclass in range(len(self.n_classes))])
         self.contextembed2 = nn.ModuleList([EmbedFC(self.n_classes[iclass], self.n_out2) for iclass in range(len(self.n_classes))])
 
@@ -387,27 +410,24 @@ class ContextUnet(nn.Module):
 
     def forward(self, x, c, t, context_mask=None):
         # x is (noisy) image, c is context label, t is timestep, 
-        #print(f"input shape: {x.shape}")
+
         x = self.init_conv(x)
-        #print(f"init_conv shape: {x.shape}")
         down1 = self.down1(x)
-        #print(f"down1 shape: {down1.shape}")
+
         down2 = self.down2(down1)
-        #print(f"down2 shape: {down2.shape}")
         hiddenvec = self.to_vec(down2)
-        #print(f"hiddenvec shape: {hiddenvec.shape}")
         temb1 = self.timeembed1(t).view(-1, int(self.n_feat), 1, 1)
         temb2 = self.timeembed2(t).view(-1, int(self.n_feat/2), 1, 1)
-
         # embed context, time step
         cemb1 = 0
         cemb2 = 0
         for ic in range(len(self.n_classes)):
             tmpc = c[ic]
             if tmpc.dtype==torch.int64: 
-                tmpc = nn.functional.one_hot(tmpc, num_classes=self.n_classes[ic]).type(torch.float)
-            cemb1 += self.contextembed1[ic](tmpc).view(-1, int(self.n_out1/1.), 1, 1)
-            cemb2 += self.contextembed2[ic](tmpc).view(-1, int(self.n_out2/1.), 1, 1)
+                tmpc = nn.functional.one_hot(tmpc, num_classes=self.n_classes[ic])
+
+            cemb1 += self.contextembed1[ic](tmpc.type(torch.float)).view(-1, int(self.n_out1/1.), 1, 1)
+            cemb2 += self.contextembed2[ic](tmpc.type(torch.float)).view(-1, int(self.n_out2/1.), 1, 1)
 
         up1 = self.up0(hiddenvec)
         up2 = self.up1(cemb1*up1 + temb1, down2)
@@ -508,7 +528,6 @@ class DDPM(nn.Module):
         x_i_store = np.array(x_i_store)
         return x_i, x_i_store
 
-
     def ddim_step(self, x_t, t, noise_pred):
         """
         DDIM step to predict the next state of the image.
@@ -545,7 +564,18 @@ class DDPM(nn.Module):
         x_i_store = np.array(x_i_store)
         return x_t, x_i_store
 
-    
+    def forward_diff(self, x, t):
+        """
+        this method is used in training, so samples t and noise randomly
+        """
+        #t is in range 0 to 1 convert it to 1 to n_T
+        _ts = (t * self.n_T).long().to(self.device)
+        noise = torch.randn_like(x)  # eps ~ N(0, 1)
+
+        x_t = (
+            self.sqrtab[_ts, None, None, None] * x
+            + self.sqrtmab[_ts, None, None, None] * noise
+        )  
 
 def training(args):
 
@@ -599,10 +629,9 @@ def training(args):
     experiment_classes = {
         "H42-train1": [2, 3, 1, 1],
         "H22-train1": [2, 2],
-        "default": [2, 3, 1]
+        "default": [2, 3, 1],
     }
-    n_classes = experiment_classes.get(experiment, experiment_classes["default"])
-
+    n_classes = experiment_classes.get(experiment, experiment_classes["default"]) if not our_labels else [2, 2, 2]
     if "celeba" in dataset:
         n_classes = [2,2,2]
 
@@ -616,7 +645,7 @@ def training(args):
     save_dir = save_dir +str(now) + "_"+ str(num_samples) + "_" + str(test_size) + "_" + str(n_feat) + "_" + str(n_T) + "_" + str(n_epoch) \
                         + "_" + str(lrate) + "_" + remove_node + "_" + str(alpha) + "_" + str(beta) + "_" + str(seed) + "/" #+ str(type_attention) + "/"
     if not os.path.isdir(save_dir): os.makedirs(save_dir)
-    ddpm = DDPM(nn_model=ContextUnet(in_channels=in_channels, n_feat=n_feat, n_classes=n_classes, dataset=dataset, type_attention=type_attention), 
+    ddpm = DDPM(nn_model=ContextUnet(in_channels=in_channels, n_feat=n_feat, n_classes=n_classes, dataset=dataset, type_attention=type_attention, discrete_classes=our_labels), 
                                      betas=(lrate, 0.02), n_T=n_T, device=device, drop_prob=0.1, n_classes=n_classes)
     ddpm.to(device)
 
@@ -630,7 +659,7 @@ def training(args):
                 'test_loss_per_batch': {key: [] for key in configs["test"]}}
     output_configs = list(set(configs["test"] + configs["train"])) 
     for config in output_configs: 
-        test_dataset = load_dataset.my_dataset(tf, n_sample, dataset, configs=config, training=False, test_size=test_size) 
+        test_dataset = load_dataset.my_dataset(tf, n_sample, dataset, configs=config, training=False, test_size=test_size, our_labels=our_labels)
         test_dataloaders[config] = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=1)
 
     optim = torch.optim.Adam(ddpm.parameters(), lr=lrate)
@@ -647,10 +676,18 @@ def training(args):
         for x, c in pbar:
             optim.zero_grad()
             x = x.to(device)
+
+            #x = 2 * x - 1
             _c = [tmpc.to(device) for tmpc in c.values()]
             with torch.no_grad():
-                emb, _, [_, _, code] = vqgan.encode(x)
+                #normalize x to 0-1 
+                #x = x/x.max()
+                emb, _, [_, _, code] = vqgan.encode(2*x-1)
                 emb = F.pad(emb, (1, 0, 1, 0), value=0)
+            
+            #save forward diff 
+            
+            ddpm.forward_diff(emb, torch.tensor([0.0]).to(device))
             loss = ddpm(emb, _c)
             log_dict['train_loss_per_batch'].append(loss.item())
             loss.backward()
@@ -666,7 +703,7 @@ def training(args):
                 for test_x, test_c in test_dataloaders[test_config]:
                     test_x = test_x.to(device)
                     _test_c = [tmptest_c.to(device) for tmptest_c in test_c.values()]
-                    emb_test, _, [_, _, code] = vqgan.encode(test_x)
+                    emb_test, _, [_, _, code] = vqgan.encode(test_x*2-1)
                     emb_test = F.pad(emb_test, (1, 0, 1, 0), value=0)
                     test_loss = ddpm(emb_test, _test_c)
                     log_dict['test_loss_per_batch'][test_config].append(test_loss.item())
@@ -675,17 +712,26 @@ def training(args):
                 for test_config in output_configs: 
                     x_real, c_gen = next(iter(test_dataloaders[test_config]))
                     x_real = x_real[:n_sample].to(device)
+                    x_real_emb, _, [_, _, code] = vqgan.encode(x_real*2-1)
+                    x_real_emb = F.pad(x_real_emb, (1, 0, 1, 0), value=0)
+                    x_real_ae_gen = vqgan.decode(x_real_emb[...,1:,1:])
+                    x_real_ae_gen = x_real_ae_gen[0] if isinstance(x_real_ae_gen, tuple) else x_real_ae_gen
+                    x_real_ae_gen = (x_real_ae_gen + 1)/2   
+                    np.savez_compressed(save_dir + f"real_"+test_config+"_ep"+str(ep)+".npz", x_real=x_real.detach().cpu().numpy())
+                    np.savez_compressed(save_dir + f"real_ae_gen_"+test_config+"_ep"+str(ep)+".npz", x_real_ae_gen=x_real_ae_gen.detach().cpu().numpy())
+                    print('saved real image at ' + save_dir + f"real_"+test_config+"_ep"+str(ep)+".png")
+                    print('saved real ae gen image at ' + save_dir + f"real_ae_gen_"+test_config+"_ep"+str(ep)+".png")
                     if scheduler=="DDIM":
                         x_tok, x_gen_store = ddpm.sample_ddim(n_sample, c_gen, (in_channels, 8, 8), device)
                         # how to remove by index the last element of x_gen F.pad(emb_test, (1, 0, 1, 0), value=0)
                         x_gen = vqgan.decode(x_tok[...,1:,1:])
                         x_gen = x_gen[0] if isinstance(x_gen, tuple) else x_gen  # if dino loss is included
-                        x_gen = 2 * x_gen - 1
+                        x_gen = (x_gen + 1)/2
                     else:
                         x_tok, x_gen_store = ddpm.sample(n_sample, c_gen, (in_channels, 8, 8), device, guide_w=0.0)
                         x_gen = vqgan.decode(x_tok[...,1:,1:])
                         x_gen = x_gen[0] if isinstance(x_gen, tuple) else x_gen  # if dino loss is included
-                        x_gen = 2 * x_gen - 1
+                        x_gen = (x_gen + 1)/2
                     np.savez_compressed(save_dir + f"image_"+test_config+"_ep"+str(ep)+".npz", x_gen=x_gen.detach().cpu().numpy()) 
                     print('saved image at ' + save_dir + f"image_"+test_config+"_ep"+str(ep)+".png")
 
