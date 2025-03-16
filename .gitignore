@@ -4,4 +4,4 @@ image_tokenization/
 *.pyc
 .vscode/
 logs/
-probes/
+probes/*pt

@@ -183,7 +183,7 @@ if __name__ == "__main__":
         if valid_loss < best_valid_loss:
             best_valid_loss = valid_loss
             save_dir = 'probes'
-            save_path = os.path.join(save_dir, 'linear-classifier_'+dataset+'_multi-class.pt')
+            save_path = os.path.join(save_dir, 'linear-classifier_'+dataset+'_multi-class_debug.pt')
             os.makedirs(save_dir, exist_ok=True)
             torch.save(model.state_dict(), save_path)   
         end_time = time.monotonic()
