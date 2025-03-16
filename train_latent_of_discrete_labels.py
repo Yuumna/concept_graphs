@@ -647,6 +647,10 @@ def training(args):
     if not os.path.isdir(save_dir): os.makedirs(save_dir)
     ddpm = DDPM(nn_model=ContextUnet(in_channels=in_channels, n_feat=n_feat, n_classes=n_classes, dataset=dataset, type_attention=type_attention, discrete_classes=our_labels), 
                                      betas=(lrate, 0.02), n_T=n_T, device=device, drop_prob=0.1, n_classes=n_classes)
+    
+    # Print the number of parameters in ContextUnet
+    total_params = sum(p.numel() for p in ddpm.nn_model.parameters())
+    print(f"ContextUnet model size: {total_params} parameters")
     ddpm.to(device)
 
 
