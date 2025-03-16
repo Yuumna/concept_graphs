@@ -190,7 +190,7 @@ class TransformerEncoder(nn.Module):
             l_attn.append(attention_weight)
         return x, l_attn
 
-class MaskTransformer(nn.Module):
+class VisionTransformer(nn.Module):
     def __init__(self, img_size=28, num_tokens= 8 ,hidden_dim=128, codebook_size=1024, depth=7, heads=8, mlp_dim=1040, dropout=0.1, nclass=2, ignore_attn_to_source=False, qk_norm=False):
         """ Initialize the Transformer model.
             :param:
@@ -309,3 +309,128 @@ class MaskTransformer(nn.Module):
         
         return mask
 
+
+class VisionTransformer_Pix(nn.Module):
+    def __init__(self, img_size=28, num_tokens= 7 ,hidden_dim=128, codebook_size=1024, depth=7, heads=8, mlp_dim=1040, dropout=0.1, nclass=2, ignore_attn_to_source=False, qk_norm=False):
+        """ Initialize the Transformer model.
+            :param:
+                img_size       -> int:     Input image size (default: 256)
+                hidden_dim     -> int:     Hidden dimension for the transformer (default: 768)
+                codebook_size  -> int:     Size of the codebook (default: 1024)
+                depth          -> int:     Depth of the transformer (default: 24)
+                heads          -> int:     Number of attention heads (default: 8)
+                mlp_dim        -> int:     MLP dimension (default: 3072)
+                dropout        -> float:   Dropout rate (default: 0.1)
+                nclass         -> int:     Number of classes (default: 1000)
+        """
+
+        super().__init__()
+        self.nclass = nclass
+        self.num_tokens = num_tokens
+        self.patch_size = img_size // num_tokens
+        self.codebook_size = codebook_size
+        self.class_emb = nn.Embedding(nclass, hidden_dim)  # +1 for the mask of the viz token, +1 for mask of the class
+        self.tok_emb = nn.Linear(num_tokens*num_tokens*3, hidden_dim) 
+        self.patch_embedding = nn.Conv2d(in_channels=3, out_channels=hidden_dim, kernel_size=self.patch_size, stride=self.patch_size)
+
+        self.pos_emb = nn.init.trunc_normal_(nn.Parameter(torch.zeros(1, (self.num_tokens*self.num_tokens)+3 +1 , hidden_dim)), 0., 0.02) #+1 for time
+        self.time_emb = nn.Sequential(
+            nn.Linear(1, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, hidden_dim)
+        )
+        # First layer before the Transformer block
+        self.first_layer = nn.Sequential(
+            nn.LayerNorm(hidden_dim, eps=1e-12),
+            nn.Dropout(p=dropout),
+            nn.Linear(in_features=hidden_dim, out_features=hidden_dim),
+            nn.GELU(),
+            nn.LayerNorm(hidden_dim, eps=1e-12),
+            nn.Dropout(p=dropout),
+            nn.Linear(in_features=hidden_dim, out_features=hidden_dim),
+        )
+
+        self.transformer = TransformerEncoder(dim=hidden_dim, depth=depth, heads=heads, mlp_dim=mlp_dim, dropout=dropout, qk_norm=qk_norm)
+        
+        # Last layer after the Transformer block
+        self.last_layer = nn.Sequential(
+            nn.LayerNorm(hidden_dim, eps=1e-12),
+            nn.Dropout(p=dropout),
+            nn.Linear(in_features=hidden_dim, out_features=hidden_dim),
+            nn.GELU(),
+            nn.LayerNorm(hidden_dim, eps=1e-12),
+        )
+        self.out = nn.Linear(hidden_dim, self.patch_size *self.patch_size *3)
+        # Bias for the last linear output
+        self.ignore_attn_to_source = ignore_attn_to_source
+
+    def forward(self, img_token, t, y=None ,drop_label=None, return_attn=False):
+        """ Forward.
+            :param:
+                img_token      -> torch.LongTensor: bsize x 16 x 16, the encoded image tokens
+                y              -> torch.LongTensor: condition class to generate
+                drop_label     -> torch.BoolTensor: either or not to drop the condition
+                return_attn    -> Bool: return the attn for visualization
+            :return:
+                logit:         -> torch.FloatTensor: bsize x path_size*path_size * 1024, the predicted logit
+                attn:          -> list(torch.FloatTensor): list of attention for visualization
+        """
+        b, d, w, h= img_token.size()
+        y = torch.stack([i for i in y ], dim= 1) if y is not None else None
+        if y is not None:
+            #print(f"y shape: {y.shape}")
+            cls_token = y.view(b, -1) #+ self.codebook_size + 1  # Shift the class token by the amount of codebook # +1 not 33 
+            if drop_label is not None:
+                cls_token[drop_label.long()] = self.codebook_size + 1 + self.nclass  # Drop condition
+            #input = torch.cat([img_token.view(b, -1), cls_token.view(b, -1)], -1)  # concat visual tokens and class tokens
+        else:
+            input = img_token.view(b, -1)
+        # film conditiong , or add it to the d ,
+        
+        #input = img_token.permute(0, 2, 3, 1).reshape(b, w*h, d)  # b, w*h, d
+        patches = self.patch_embedding(img_token)  
+        patches = patches.flatten(2).transpose(1, 2)
+
+        #tok_embeddings = self.tok_emb(input)
+        cls_emb = self.class_emb(cls_token)
+        t = t.view(b, 1) 
+        t_emb = self.time_emb(t)  
+        t_emb = t_emb.unsqueeze(1)
+        all_emb = torch.cat([patches ,cls_emb, t_emb], 1)
+        
+        # Position embedding
+        pos_embeddings = self.pos_emb        
+        x = all_emb + pos_embeddings
+
+        # transformer forward pass
+        x = self.first_layer(x)
+        x, attn = self.transformer(x) if not self.ignore_attn_to_source else self.transformer(x, attn_mask=self.build_ignore_source_mask(x.size(1), w*h, device=x.device))
+        x = x[:, : self.num_tokens*self.num_tokens, :]
+        x = self.out(x)
+        # premuate x to b, d, w, h
+        x = x.view(b, x.shape[1], 3, self.patch_size, self.patch_size) 
+        # change ([64, 128, 64]) to ([64, 128, 8,8])
+        c_h = int(x.shape[1] ** 0.5)
+        x = x.permute(0, 2, 1, 3, 4)
+        x = x.reshape(b, 3, c_h * self.patch_size, c_h * self.patch_size)
+        return x 
+    
+    def build_ignore_source_mask(self, total_tokens: int, num_img_tokens: int, device: torch.device) -> torch.Tensor:
+        """
+        Build an attention mask of shape (total_tokens, total_tokens) such that:
+        - For query positions corresponding to image tokens (indices 0 to num_img_tokens-1), no masking is applied.
+        - For query positions corresponding to label tokens (indices num_img_tokens to total_tokens-1), 
+            all keys corresponding to image tokens are masked (set to -inf) and, optionally, label-to-label attention
+            is disabled except for the diagonal (self-attention) so that label tokens remain unchanged.
+        """
+
+        # Initialize the mask with all True values.
+        mask = torch.ones(total_tokens, total_tokens, dtype=torch.bool, device=device)
+        
+        # For label token queries (rows from num_img_tokens onward), disallow attention to image tokens.
+        mask[num_img_tokens:, :num_img_tokens] = False
+        
+        # For label token queries, disallow attention to other label tokens by default.
+        mask[num_img_tokens:, num_img_tokens:] = False
+        
+        return mask
