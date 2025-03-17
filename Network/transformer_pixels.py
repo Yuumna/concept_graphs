@@ -128,6 +128,7 @@ class Attention(nn.Module):
 
         if self.fused_attn:
             # If using fused attention, pass the mask to the PyTorch function (if supported)
+            attn_mask = torch.clamp(attn_mask, min=-1e4) 
             x = F.scaled_dot_product_attention(
                 q, k, v,
                 dropout_p=self.attn_drop.p if self.training else 0.,
@@ -209,6 +210,7 @@ class VisionTransformer(nn.Module):
         self.num_tokens = num_tokens
         self.patch_size = img_size // num_tokens
         self.codebook_size = codebook_size
+        self.heads = heads
         self.class_emb = nn.Embedding(nclass, hidden_dim)  # +1 for the mask of the viz token, +1 for mask of the class
         self.tok_emb = nn.Linear(hidden_dim, hidden_dim) 
         self.pos_emb = nn.init.trunc_normal_(nn.Parameter(torch.zeros(1, (self.num_tokens*self.num_tokens)+3 +1 , hidden_dim)), 0., 0.02) #+1 for time
@@ -279,7 +281,7 @@ class VisionTransformer(nn.Module):
 
         # transformer forward pass
         x = self.first_layer(x)
-        x, attn = self.transformer(x) if not self.ignore_attn_to_source else self.transformer(x, attn_mask=self.build_ignore_source_mask(x.size(1), w*h, device=x.device))
+        x, attn = self.transformer(x) if not self.ignore_attn_to_source else self.transformer(x, attn_mask=self.build_ignore_source_mask(x.size(0), x.size(1), w*h, device=x.device))
         x = x[:, : w*h, :]
         # premuate x to b, d, w, h
         b, hw, d = x.shape
@@ -289,7 +291,7 @@ class VisionTransformer(nn.Module):
         x = x.reshape(b, d, c_h, c_h)
         return x 
     
-    def build_ignore_source_mask(self, total_tokens: int, num_img_tokens: int, device: torch.device) -> torch.Tensor:
+    def build_ignore_source_mask(self, batch_size, total_tokens: int, num_img_tokens: int, device: torch.device) -> torch.Tensor:
         """
         Build an attention mask of shape (total_tokens, total_tokens) such that:
         - For query positions corresponding to image tokens (indices 0 to num_img_tokens-1), no masking is applied.
@@ -307,6 +309,10 @@ class VisionTransformer(nn.Module):
         # For label token queries, disallow attention to other label tokens by default.
         mask[num_img_tokens:, num_img_tokens:] = False
         
+        mask = mask.unsqueeze(0).unsqueeze(0) 
+        mask = mask.expand(batch_size, self.heads, total_tokens, total_tokens)  
+        mask = mask.to(dtype=torch.float32) 
+        mask = mask.masked_fill(mask == 0, float('-inf'))  
         return mask
 
 
@@ -329,6 +335,7 @@ class VisionTransformer_Pix(nn.Module):
         self.num_tokens = num_tokens
         self.patch_size = img_size // num_tokens
         self.codebook_size = codebook_size
+        self.heads = heads
         self.class_emb = nn.Embedding(nclass, hidden_dim)  # +1 for the mask of the viz token, +1 for mask of the class
         self.tok_emb = nn.Linear(num_tokens*num_tokens*3, hidden_dim) 
         self.patch_embedding = nn.Conv2d(in_channels=3, out_channels=hidden_dim, kernel_size=self.patch_size, stride=self.patch_size)
@@ -404,7 +411,7 @@ class VisionTransformer_Pix(nn.Module):
 
         # transformer forward pass
         x = self.first_layer(x)
-        x, attn = self.transformer(x) if not self.ignore_attn_to_source else self.transformer(x, attn_mask=self.build_ignore_source_mask(x.size(1), w*h, device=x.device))
+        x, attn = self.transformer(x) if not self.ignore_attn_to_source else self.transformer(x, attn_mask=self.build_ignore_source_mask(x.size(0), x.size(1), w*h, device=x.device))
         x = x[:, : self.num_tokens*self.num_tokens, :]
         x = self.out(x)
         # premuate x to b, d, w, h
@@ -415,7 +422,7 @@ class VisionTransformer_Pix(nn.Module):
         x = x.reshape(b, 3, c_h * self.patch_size, c_h * self.patch_size)
         return x 
     
-    def build_ignore_source_mask(self, total_tokens: int, num_img_tokens: int, device: torch.device) -> torch.Tensor:
+    def build_ignore_source_mask(self, batch_size, total_tokens: int, num_img_tokens: int, device: torch.device) -> torch.Tensor:
         """
         Build an attention mask of shape (total_tokens, total_tokens) such that:
         - For query positions corresponding to image tokens (indices 0 to num_img_tokens-1), no masking is applied.
@@ -432,5 +439,10 @@ class VisionTransformer_Pix(nn.Module):
         
         # For label token queries, disallow attention to other label tokens by default.
         mask[num_img_tokens:, num_img_tokens:] = False
+        
+        mask = mask.unsqueeze(0).unsqueeze(0) 
+        mask = mask.expand(batch_size, self.heads, total_tokens, total_tokens)  
+        mask = mask.to(dtype=torch.float32) 
+        mask = mask.masked_fill(mask == 0, float('-inf'))  
         
         return mask

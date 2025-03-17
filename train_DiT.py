@@ -338,7 +338,7 @@ def training(args):
                         + "_" + str(lrate) + "_" + remove_node + "_" + str(alpha) + "_" + str(beta) + "_" + str(seed) + "/" #+ str(type_attention) + "/"
     if not os.path.isdir(save_dir): os.makedirs(save_dir)
 
-    mask_transf = VisionTransformer_Pix(img_size=28 , nclass=len(n_classes), depth=7, heads=8, mlp_dim=1040, dropout=0.1, codebook_size=256, qk_norm=True, ignore_attn_to_source=False)
+    mask_transf = VisionTransformer_Pix(img_size=28 , nclass=len(n_classes), depth=7, heads=8, mlp_dim=1040, dropout=0.1, codebook_size=256, qk_norm=True, ignore_attn_to_source=True)
     ddpm = DDPM(nn_model=mask_transf, betas=(lrate, 0.02), n_T=n_T, device=device, drop_prob=0.1, n_classes=n_classes)
     ddpm.to(device)
 
