@@ -25,11 +25,6 @@ import sys
 sys.path.append("./image_tokenization")
 from image_tokenization.main import instantiate_from_config
 
-parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-print(parent_dir)
-sys.path.append(parent_dir)
-from maskgit.models.maskgit import MaskGIT
-
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 
@@ -54,7 +49,7 @@ parser.add_argument('--our_labels', default= False, type=bool)
 parser.add_argument('--scheduler', default="", type=str)
 parser.add_argument('--seed', type=int, default=1)
 parser.add_argument('--token_folder', type=str, default="/work/dlclarge2/aliy-maskgit/maskgit/image_tokenization/vqgan_logs/2025-02-13T13-25-14_codebook_Third_synthetic_DLC13913381")#2025-02-13T18-09-06_codebook_10244_synthetic_DLC25267020")
-
+parser.add_argument('--model', type=str, default="DiT", choices=["DiT", "U-Net"])
 
 
 
@@ -290,7 +285,7 @@ def training(args):
     scheduler = args.scheduler
     token_folder = args.token_folder
     in_channels = 3 if "celeba" in dataset else 128
-
+    model = args.model
 
     torch.manual_seed(seed)
     if torch.cuda.is_available():
@@ -329,14 +324,17 @@ def training(args):
 
     # log the timestamp
     now = datetime.datetime.now().strftime("%d-%m-%H-%M")
-    save_dir = './output/'+dataset+'/'+"latent_" +label+'/'+ experiment+'/'
+    label = "discrete" if our_labels else "continuous"
+    space = "latent" if token_folder else "pixel"
+    save_dir = './output/'+dataset+'/'+model+ '/' + space + '/'+ label+ '/'+ experiment+'/'
+    #save_dir = './output/'+dataset+'/'+"latent_" +label+'/'+ experiment+'/'
     if not os.path.isdir(save_dir): os.makedirs(save_dir)
     
     save_dir = save_dir +str(now) + "_"+ str(num_samples) + "_" + str(test_size) + "_" + str(n_feat) + "_" + str(n_T) + "_" + str(n_epoch) \
                         + "_" + str(lrate) + "_" + remove_node + "_" + str(alpha) + "_" + str(beta) + "_" + str(seed) + "/" #+ str(type_attention) + "/"
     if not os.path.isdir(save_dir): os.makedirs(save_dir)
 
-    mask_transf = MaskTransformer(img_size=28 ,hidden_dim=in_channels, nclass=len(n_classes), depth=7, heads=8, mlp_dim=1040, dropout=0.1, codebook_size=256, qk_norm=True, ignore_attn_to_source=False)
+    mask_transf = MaskTransformer(img_size=28, hidden_dim=in_channels, nclass=len(n_classes), depth=7, heads=8, mlp_dim=1040, dropout=0.1, codebook_size=256, qk_norm=True, ignore_attn_to_source=True)
     ddpm = DDPM(nn_model=mask_transf, betas=(lrate, 0.02), n_T=n_T, device=device, drop_prob=0.1, n_classes=n_classes)
     ddpm.to(device)
 
@@ -378,7 +376,7 @@ def training(args):
                 emb, _, [_, _, code] = vqgan.encode(2*x-1)
                 
                 code = code.reshape(x.size(0), 7, 7)
-                emb = F.pad(emb, (1, 0, 1, 0), value=0)
+                #emb = F.pad(emb, (1, 0, 1, 0), value=0)
                 #code = code.reshape(x.size(0), args.num_tokens, args.num_tokens)
             
             #ddpm.forward_diff(emb, torch.tensor([0.0]).to(device))
@@ -388,7 +386,9 @@ def training(args):
             loss_ema = loss.item()
             pbar.set_description(f"loss: {loss_ema:.4f}")
             optim.step()
-        
+            for name, param in ddpm.named_parameters():
+                if param.grad is None:
+                    print(f" after backward: {name}")
 
         ddpm.eval()
         with torch.no_grad():
@@ -398,7 +398,7 @@ def training(args):
                     test_x = test_x.to(device)
                     _test_c = [tmptest_c.to(device) for tmptest_c in test_c.values()]
                     emb_test, _, [_, _, code] = vqgan.encode(test_x*2-1)
-                    emb_test = F.pad(emb_test, (1, 0, 1, 0), value=0)
+                    #emb_test = F.pad(emb_test, (1, 0, 1, 0), value=0)
                     #code_test = code_test.reshape(test_x.size(0), 7, 7)
                     test_loss = ddpm(emb_test, _test_c)
                     log_dict['test_loss_per_batch'][test_config].append(test_loss.item())
@@ -408,7 +408,7 @@ def training(args):
                     x_real, c_gen = next(iter(test_dataloaders[test_config]))
                     x_real = x_real[:n_sample].to(device)
                     x_real_emb, _, [_, _, code] = vqgan.encode(x_real*2-1)
-                    x_real_emb = F.pad(x_real_emb, (1, 0, 1, 0), value=0)
+                    #x_real_emb = F.pad(x_real_emb, (1, 0, 1, 0), value=0)
                     x_real_ae_gen = vqgan.decode(x_real_emb[...,1:,1:])
                     x_real_ae_gen = x_real_ae_gen[0] if isinstance(x_real_ae_gen, tuple) else x_real_ae_gen
                     x_real_ae_gen = (x_real_ae_gen + 1)/2   
@@ -417,14 +417,14 @@ def training(args):
                     print('saved real image at ' + save_dir + f"real_"+test_config+"_ep"+str(ep)+".png")
                     print('saved real ae gen image at ' + save_dir + f"real_ae_gen_"+test_config+"_ep"+str(ep)+".png")
                     if scheduler=="DDIM":
-                        x_tok, x_gen_store = ddpm.sample_ddim(n_sample, c_gen, (in_channels ,8, 8), device)
+                        x_tok, x_gen_store = ddpm.sample_ddim(n_sample, c_gen, (in_channels ,7, 7), device)
                         # how to remove by index the last element of x_gen F.pad(emb_test, (1, 0, 1, 0), value=0)
                         x_gen = vqgan.decode(x_tok[...,1:,1:])
                         x_gen = x_gen[0] if isinstance(x_gen, tuple) else x_gen  # if dino loss is included
                         x_gen = (x_gen + 1)/2
                     else:
                         #c_gen_[tmpc.to(device) for tmpc in c.values()]
-                        x_tok, x_gen_store = ddpm.sample(n_sample, c_gen, (in_channels ,8, 8), device, guide_w=0.0)
+                        x_tok, x_gen_store = ddpm.sample(n_sample, c_gen, (in_channels ,7, 7), device, guide_w=0.0)
                         x_gen = vqgan.decode(x_tok[...,1:,1:])
                         x_gen = x_gen[0] if isinstance(x_gen, tuple) else x_gen  # if dino loss is included
                         x_gen = (x_gen + 1)/2

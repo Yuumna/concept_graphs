@@ -49,7 +49,7 @@ parser.add_argument('--dataset', default="single-body_2d_3classes", type=str)
 parser.add_argument('--our_labels', default= False, type=bool)
 parser.add_argument('--scheduler', default="", type=str)
 parser.add_argument('--seed', type=int, default=1)
-parser.add_argument('--token_folder', type=str, default="/work/dlclarge2/aliy-maskgit/maskgit/image_tokenization/vqgan_logs/2025-02-13T13-25-14_codebook_Third_synthetic_DLC13913381")#2025-02-13T18-09-06_codebook_10244_synthetic_DLC25267020")
+parser.add_argument('--token_folder', type=str, default="")#"/work/dlclarge2/aliy-maskgit/maskgit/image_tokenization/vqgan_logs/2025-02-13T13-25-14_codebook_Third_synthetic_DLC13913381")#2025-02-13T18-09-06_codebook_10244_synthetic_DLC25267020")
 parser.add_argument('--model', type=str, default="DiT", choices=["DiT", "U-Net"])
 
 

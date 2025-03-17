@@ -83,6 +83,7 @@ class Attention(nn.Module):
         self.attn_drop = nn.Dropout(dropout)
         self.proj = nn.Linear(dim, dim, bias=proj_bias)
         self.proj_drop = nn.Dropout(proj_drop)
+        #self.multihead_attn = nn.MultiheadAttention(embed_dim=128, num_heads=num_heads, dropout=0.1)
 
     def forward(self, x: torch.Tensor, attn_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
         """
@@ -128,6 +129,7 @@ class Attention(nn.Module):
 
         if self.fused_attn:
             # If using fused attention, pass the mask to the PyTorch function (if supported)
+            attn_mask = torch.clamp(attn_mask, min=-1e4) 
             x = F.scaled_dot_product_attention(
                 q, k, v,
                 dropout_p=self.attn_drop.p if self.training else 0.,
@@ -191,7 +193,7 @@ class TransformerEncoder(nn.Module):
         return x, l_attn
 
 class MaskTransformer(nn.Module):
-    def __init__(self, img_size=28, num_tokens= 8 ,hidden_dim=128, codebook_size=1024, depth=7, heads=8, mlp_dim=1040, dropout=0.1, nclass=2, ignore_attn_to_source=False, qk_norm=False):
+    def __init__(self, img_size=28, num_tokens= 7 ,hidden_dim=128, codebook_size=1024, depth=7, heads=8, mlp_dim=1040, dropout=0.1, nclass=2, ignore_attn_to_source=False, qk_norm=False):
         """ Initialize the Transformer model.
             :param:
                 img_size       -> int:     Input image size (default: 256)
@@ -209,6 +211,7 @@ class MaskTransformer(nn.Module):
         self.num_tokens = num_tokens
         self.patch_size = img_size // num_tokens
         self.codebook_size = codebook_size
+        self.heads = heads
         self.class_emb = nn.Embedding(nclass, hidden_dim)  # +1 for the mask of the viz token, +1 for mask of the class
         self.tok_emb = nn.Linear(hidden_dim, hidden_dim) 
         self.pos_emb = nn.init.trunc_normal_(nn.Parameter(torch.zeros(1, (self.num_tokens*self.num_tokens)+3 +1 , hidden_dim)), 0., 0.02) #+1 for time
@@ -230,15 +233,6 @@ class MaskTransformer(nn.Module):
 
         self.transformer = TransformerEncoder(dim=hidden_dim, depth=depth, heads=heads, mlp_dim=mlp_dim, dropout=dropout, qk_norm=qk_norm)
         
-        # Last layer after the Transformer block
-        self.last_layer = nn.Sequential(
-            nn.LayerNorm(hidden_dim, eps=1e-12),
-            nn.Dropout(p=dropout),
-            nn.Linear(in_features=hidden_dim, out_features=hidden_dim),
-            nn.GELU(),
-            nn.LayerNorm(hidden_dim, eps=1e-12),
-        )
-
         # Bias for the last linear output
         self.ignore_attn_to_source = ignore_attn_to_source
 
@@ -279,7 +273,7 @@ class MaskTransformer(nn.Module):
 
         # transformer forward pass
         x = self.first_layer(x)
-        x, attn = self.transformer(x) if not self.ignore_attn_to_source else self.transformer(x, attn_mask=self.build_ignore_source_mask(x.size(1), w*h, device=x.device))
+        x, attn = self.transformer(x) if not self.ignore_attn_to_source else self.transformer(x, attn_mask=self.build_ignore_source_mask(x.size(0), x.size(1), w*h, device=x.device))
         x = x[:, : w*h, :]
         # premuate x to b, d, w, h
         b, hw, d = x.shape
@@ -289,7 +283,7 @@ class MaskTransformer(nn.Module):
         x = x.reshape(b, d, c_h, c_h)
         return x 
     
-    def build_ignore_source_mask(self, total_tokens: int, num_img_tokens: int, device: torch.device) -> torch.Tensor:
+    def build_ignore_source_mask(self, batch_size ,total_tokens: int, num_img_tokens: int, device: torch.device) -> torch.Tensor:
         """
         Build an attention mask of shape (total_tokens, total_tokens) such that:
         - For query positions corresponding to image tokens (indices 0 to num_img_tokens-1), no masking is applied.
@@ -307,5 +301,10 @@ class MaskTransformer(nn.Module):
         # For label token queries, disallow attention to other label tokens by default.
         mask[num_img_tokens:, num_img_tokens:] = False
         
+        mask = mask.unsqueeze(0).unsqueeze(0) 
+        mask = mask.expand(batch_size, self.heads, total_tokens, total_tokens)  
+        mask = mask.to(dtype=torch.float32) 
+        mask = mask.masked_fill(mask == 0, float('-inf'))  
+
         return mask
 
