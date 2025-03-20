@@ -129,7 +129,7 @@ class Attention(nn.Module):
 
         if self.fused_attn:
             # If using fused attention, pass the mask to the PyTorch function (if supported)
-            attn_mask = torch.clamp(attn_mask, min=-1e4) 
+            #attn_mask = torch.clamp(attn_mask, min=-1e4) 
             x = F.scaled_dot_product_attention(
                 q, k, v,
                 dropout_p=self.attn_drop.p if self.training else 0.,
@@ -170,10 +170,11 @@ class TransformerEncoder(nn.Module):
         """
         super().__init__()
         self.layers = nn.ModuleList([])
-        for _ in range(depth):
+        for i in range(depth):
+            dropout_i = dropout if i != depth - 1 else 0
             self.layers.append(nn.ModuleList([
-                PreNorm(dim, Attention(dim, heads, dropout=dropout, qk_norm=qk_norm)),
-                PreNorm(dim, FeedForward(dim, mlp_dim, dropout=dropout))
+                PreNorm(dim, Attention(dim, heads, dropout=dropout_i, qk_norm=qk_norm)),
+                PreNorm(dim, FeedForward(dim, mlp_dim, dropout=dropout_i))
             ]))
 
     def forward(self, x, attn_mask=None):
@@ -193,7 +194,7 @@ class TransformerEncoder(nn.Module):
         return x, l_attn
 
 class MaskTransformer(nn.Module):
-    def __init__(self, img_size=28, num_tokens= 7 ,hidden_dim=128, codebook_size=1024, depth=7, heads=8, mlp_dim=1040, dropout=0.1, nclass=2, ignore_attn_to_source=False, qk_norm=False):
+    def __init__(self, img_size=28, num_tokens= 8 ,hidden_dim=128, codebook_size=1024, depth=7, heads=8, mlp_dim=1040, dropout=0.1, nclass=2, ignore_attn_to_source=False, qk_norm=False):
         """ Initialize the Transformer model.
             :param:
                 img_size       -> int:     Input image size (default: 256)
@@ -232,11 +233,11 @@ class MaskTransformer(nn.Module):
         )
 
         self.transformer = TransformerEncoder(dim=hidden_dim, depth=depth, heads=heads, mlp_dim=mlp_dim, dropout=dropout, qk_norm=qk_norm)
-        
+        self.final_layer = nn.Linear(hidden_dim, hidden_dim)
         # Bias for the last linear output
         self.ignore_attn_to_source = ignore_attn_to_source
 
-    def forward(self, img_token, t, y=None ,drop_label=None, return_attn=False):
+    def forward(self, img_token, y, t ,drop_label=None, return_attn=False):
         """ Forward.
             :param:
                 img_token      -> torch.LongTensor: bsize x 16 x 16, the encoded image tokens
@@ -248,7 +249,8 @@ class MaskTransformer(nn.Module):
                 attn:          -> list(torch.FloatTensor): list of attention for visualization
         """
         b, d, w, h= img_token.size()
-        y = torch.stack([i for i in y ], dim= 1) if y is not None else None
+        #print(y)
+        y = torch.stack(y, dim= 1) #if y is not None else None
         if y is not None:
             #print(f"y shape: {y.shape}")
             cls_token = y.view(b, -1) #+ self.codebook_size + 1  # Shift the class token by the amount of codebook # +1 not 33 
@@ -266,7 +268,11 @@ class MaskTransformer(nn.Module):
         t_emb = self.time_emb(t)  
         t_emb = t_emb.unsqueeze(1)
         all_emb = torch.cat([tok_embeddings ,cls_emb, t_emb], 1)
-        
+        # print(f"all_emb shape: {all_emb.shape}")
+        # print(f"tok_embeddings shape: {tok_embeddings.shape}")
+        # print(f"cls_emb shape: {cls_emb.shape}")
+        # print(f"t_emb shape: {t_emb.shape}")
+
         # Position embedding
         pos_embeddings = self.pos_emb        
         x = all_emb + pos_embeddings
@@ -274,6 +280,7 @@ class MaskTransformer(nn.Module):
         # transformer forward pass
         x = self.first_layer(x)
         x, attn = self.transformer(x) if not self.ignore_attn_to_source else self.transformer(x, attn_mask=self.build_ignore_source_mask(x.size(0), x.size(1), w*h, device=x.device))
+        x = self.final_layer(x)
         x = x[:, : w*h, :]
         # premuate x to b, d, w, h
         b, hw, d = x.shape
@@ -281,7 +288,7 @@ class MaskTransformer(nn.Module):
         c_h = int(hw ** 0.5)
         x = x.permute(0, 2, 1)
         x = x.reshape(b, d, c_h, c_h)
-        print(f"Mean: {x.mean().item()}, Std: {x.std().item()}, Min: {x.min().item()}, Max: {x.max().item()}")
+        #print(f"Mean: {x.mean().item()}, Std: {x.std().item()}, Min: {x.min().item()}, Max: {x.max().item()}")
 
         return x 
     
@@ -302,11 +309,6 @@ class MaskTransformer(nn.Module):
         
         # For label token queries, disallow attention to other label tokens by default. 
         mask[num_img_tokens:, num_img_tokens:] = torch.eye(total_tokens - num_img_tokens, dtype=torch.bool, device=device)
-        
-        mask = mask.unsqueeze(0).unsqueeze(0) 
-        mask = mask.expand(batch_size, self.heads, total_tokens, total_tokens)  
-        mask = mask.to(dtype=torch.float32) 
-        mask = mask.masked_fill(mask == 0, float('-inf'))  
 
         return mask
 
