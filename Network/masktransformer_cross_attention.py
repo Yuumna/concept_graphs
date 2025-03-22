@@ -28,6 +28,29 @@ class PreNorm(nn.Module):
                 torch.Tensor: Output of the function applied after layer normalization
         """
         return self.fn(self.norm(x), **kwargs)
+    
+class PreNormCTX(nn.Module):
+
+    def __init__(self, dim, fn):
+        """ PreNorm module to apply layer normalization before a given function
+            :param:
+                dim  -> int: Dimension of the input
+                fn   -> nn.Module: The function to apply after layer normalization
+            """
+        super().__init__()
+        self.norm = nn.LayerNorm(dim)
+        self.norm_ctx = nn.LayerNorm(dim)
+        self.fn = fn
+
+    def forward(self, x, ctx, **kwargs):
+        """ Forward pass through the PreNorm module
+            :param:
+                x        -> torch.Tensor: Input tensor
+                **kwargs -> _ : Additional keyword arguments for the function
+            :return
+                torch.Tensor: Output of the function applied after layer normalization
+        """
+        return self.fn(self.norm(x), ctx, **kwargs)
 
 
 class FeedForward(nn.Module):
@@ -127,36 +150,110 @@ class Attention(nn.Module):
         q, k, v = qkv.unbind(0)
         q, k = self.q_norm(q), self.k_norm(k)
 
-        if self.fused_attn:
-            # If using fused attention, pass the mask to the PyTorch function (if supported)
-            #attn_mask = torch.clamp(attn_mask, min=-1e4) 
-            x = F.scaled_dot_product_attention(
-                q, k, v,
-                dropout_p=self.attn_drop.p if self.training else 0.,
-                attn_mask=attn_mask
-            )
-            attn = None
-        else:
-            raise NotImplementedError("Non-Fused attention not implemented yet")
-            q = q * self.scale
-            attn = q @ k.transpose(-2, -1)
-            if attn_mask is not None:
-                print(f"attn_mask: {attn_mask.shape}", f"attn: {attn_mask}")
-                # If the mask is boolean, mask out positions by setting them to -inf
-                if attn_mask.dtype == torch.bool:
-                    attn = attn.masked_fill(attn_mask.logical_not(), float('-inf'))
-                else:
-                    # For a float mask, add the mask to the logits directly
-                    raise NotImplementedError("Float mask not implemented yet")
-                    attn = attn + attn_mask
-            attn = attn.softmax(dim=-1)
-            attn = self.attn_drop(attn)
-            x = attn @ v
+        # If using fused attention, pass the mask to the PyTorch function (if supported)
+        #attn_mask = torch.clamp(attn_mask, min=-1e4) 
+        x = F.scaled_dot_product_attention(
+            q, k, v,
+            dropout_p=self.attn_drop.p if self.training else 0.,
+            attn_mask=attn_mask
+        )
+        attn = None
 
         x = x.transpose(1, 2).reshape(B, N, C)
         x = self.proj(x)
         x = self.proj_drop(x)
         return x, attn
+
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from typing import Optional, Type
+
+def use_fused_attn():
+    # Placeholder for a function that returns whether fused attention should be used.
+    # Replace with actual implementation or flag if available.
+    return False
+
+class CrossAttention(nn.Module):
+    def __init__(
+            self,
+            dim: int,
+            num_heads: int = 8,
+            q_bias: bool = False,
+            kv_bias: bool = False,
+            qk_norm: bool = False,
+            proj_bias: bool = True,
+            dropout: float = 0.,
+            proj_drop: float = 0.,
+            norm_layer: Type[nn.Module] = nn.LayerNorm,
+    ) -> None:
+        super().__init__()
+        assert dim % num_heads == 0, 'dim should be divisible by num_heads'
+        self.num_heads = num_heads
+        self.head_dim = dim // num_heads
+        self.scale = self.head_dim ** -0.5
+        self.fused_attn = use_fused_attn()
+
+        # Separate linear projections for query and for key/value.
+        self.q = nn.Linear(dim, dim, bias=q_bias)
+        self.kv = nn.Linear(dim, dim * 2, bias=kv_bias)
+        self.q_norm = norm_layer(self.head_dim) if qk_norm else nn.Identity()
+        self.k_norm = norm_layer(self.head_dim) if qk_norm else nn.Identity()
+        self.attn_drop = nn.Dropout(dropout)
+        self.proj = nn.Linear(dim, dim, bias=proj_bias)
+        self.proj_drop = nn.Dropout(proj_drop)
+
+    def forward(
+            self,
+            query: torch.Tensor,
+            context: torch.Tensor,
+            attn_mask: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
+        """
+        Compute multi-head cross attention.
+
+        Parameters:
+            query (torch.Tensor): Tensor of shape (B, N_q, C), the query input.
+            context (torch.Tensor): Tensor of shape (B, N_ctx, C), the context input used for key and value.
+            attn_mask (Optional[torch.Tensor]): An optional attention mask of shape (L, S) or (B * num_heads, L, S).
+                For boolean masks, a True value indicates positions to attend to; for float masks, values are added to the logits.
+
+        Returns:
+            tuple[torch.Tensor, torch.Tensor]:
+                - Output tensor of shape (B, N_q, C) after applying cross attention.
+                - The attention weights computed during the process (set to None if not used).
+        """
+        B, N_q, C = query.shape
+        B, N_ctx, C = context.shape
+
+        # Project query and context (for key and value)
+        q = self.q(query)  # (B, N_q, C)
+        kv = self.kv(context)  # (B, N_ctx, 2 * C)
+
+        # Reshape query: (B, N_q, num_heads, head_dim) -> (B, num_heads, N_q, head_dim)
+        q = q.reshape(B, N_q, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
+        # Reshape key/value: (B, N_ctx, 2 * C) -> (B, N_ctx, 2, num_heads, head_dim) -> (2, B, num_heads, N_ctx, head_dim)
+        kv = kv.reshape(B, N_ctx, 2, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4)
+        k, v = kv[0], kv[1]
+
+        # Optionally normalize query and key for stability
+        q, k = self.q_norm(q), self.k_norm(k)
+
+        # Compute scaled dot-product attention (fused attention can be enabled if supported)
+        x = F.scaled_dot_product_attention(
+            q, k, v,
+            dropout_p=self.attn_drop.p if self.training else 0.,
+            attn_mask=attn_mask
+        )
+        attn = None  # To keep compatibility; you can modify this to return attention weights if needed.
+
+        # Reshape back to (B, N_q, C)
+        x = x.transpose(1, 2).reshape(B, N_q, C)
+        x = self.proj(x)
+        x = self.proj_drop(x)
+        return x, attn
+
 
 class TransformerEncoder(nn.Module):
     def __init__(self, dim, depth, heads, mlp_dim, dropout=0., qk_norm=False):
@@ -174,10 +271,11 @@ class TransformerEncoder(nn.Module):
             dropout_i = dropout if i != depth - 1 else 0
             self.layers.append(nn.ModuleList([
                 PreNorm(dim, Attention(dim, heads, dropout=dropout_i, qk_norm=qk_norm)),
+                PreNormCTX(dim, CrossAttention(dim, heads, dropout=dropout_i, qk_norm=qk_norm)),
                 PreNorm(dim, FeedForward(dim, mlp_dim, dropout=dropout_i))
             ]))
 
-    def forward(self, x, attn_mask=None):
+    def forward(self, x, ctx, attn_mask=None):
         """ Forward pass through the Attention module.
             :param:
                 x -> torch.Tensor: Input tensor
@@ -186,15 +284,16 @@ class TransformerEncoder(nn.Module):
                 l_attn -> list(torch.Tensor): list of the attention
         """
         l_attn = []
-        for idx, (attn, ff) in enumerate(self.layers):
+        for idx, (attn, cross_attn, ff) in enumerate(self.layers):
             attention_value, attention_weight = attn(x, attn_mask=attn_mask)
+            x, _ = cross_attn(attention_value, ctx)
             x = attention_value + x
             x = ff(x) + x
             l_attn.append(attention_weight)
         return x, l_attn
 
 class MaskTransformer(nn.Module):
-    def __init__(self, img_size=28, num_tokens= 8 ,hidden_dim=128, codebook_size=1024, depth=7, heads=8, mlp_dim=1040, nconcepts=3, dropout=0.1, nclass=2, ignore_attn_to_source=False, qk_norm=False):
+    def __init__(self, img_size=28, num_tokens= 7 ,hidden_dim=128, codebook_size=1024, depth=7, heads=8, mlp_dim=1040, dropout=0.1, nclass=2, ignore_attn_to_source=False, qk_norm=False):
         """ Initialize the Transformer model.
             :param:
                 img_size       -> int:     Input image size (default: 256)
@@ -209,14 +308,13 @@ class MaskTransformer(nn.Module):
 
         super().__init__()
         self.nclass = nclass
-        self.nconcepts = nconcepts
         self.num_tokens = num_tokens
         self.patch_size = img_size // num_tokens
         self.codebook_size = codebook_size
         self.heads = heads
-        self.class_emb = nn.Embedding(nclass*nconcepts, hidden_dim)  # +1 for the mask of the viz token, +1 for mask of the class
+        self.class_emb = nn.Embedding(nclass, hidden_dim)  # +1 for the mask of the viz token, +1 for mask of the class
         self.tok_emb = nn.Linear(hidden_dim, hidden_dim) 
-        self.pos_emb = nn.init.trunc_normal_(nn.Parameter(torch.zeros(1, (self.num_tokens*self.num_tokens)+3 +1 , hidden_dim)), 0., 0.02) #+1 for time
+        self.pos_emb = nn.init.trunc_normal_(nn.Parameter(torch.zeros(1, (self.num_tokens*self.num_tokens) , hidden_dim)), 0., 0.02) #+1 for time
         self.time_emb = nn.Sequential(
             nn.Linear(1, hidden_dim),
             nn.GELU(),
@@ -238,7 +336,7 @@ class MaskTransformer(nn.Module):
         # Bias for the last linear output
         self.ignore_attn_to_source = ignore_attn_to_source
 
-    def forward(self, img_token, y, t ,drop_label=None, return_attn=False):
+    def forward(self, img_token, t, y=None ,drop_label=None, return_attn=False):
         """ Forward.
             :param:
                 img_token      -> torch.LongTensor: bsize x 16 x 16, the encoded image tokens
@@ -250,11 +348,10 @@ class MaskTransformer(nn.Module):
                 attn:          -> list(torch.FloatTensor): list of attention for visualization
         """
         b, d, w, h= img_token.size()
-        #print(y)
-        y = torch.stack(y, dim= 1) #if y is not None else None
+        y = torch.stack([i for i in y ], dim= 1) if y is not None else None
         if y is not None:
             #print(f"y shape: {y.shape}")
-            cls_token = y.view(b, -1) + self.nclass*torch.arange(self.nconcepts, device=y.device) # Shift the class token by the amount of codebook # +1 not 33 
+            cls_token = y.view(b, -1) #+ self.codebook_size + 1  # Shift the class token by the amount of codebook # +1 not 33 
             if drop_label is not None:
                 cls_token[drop_label.long()] = self.codebook_size + 1 + self.nclass  # Drop condition
             #input = torch.cat([img_token.view(b, -1), cls_token.view(b, -1)], -1)  # concat visual tokens and class tokens
@@ -268,20 +365,16 @@ class MaskTransformer(nn.Module):
         t = t.view(b, 1) 
         t_emb = self.time_emb(t)  
         t_emb = t_emb.unsqueeze(1)
-        all_emb = torch.cat([tok_embeddings ,cls_emb, t_emb], 1)
-        # print(f"all_emb shape: {all_emb.shape}")
-        # print(f"tok_embeddings shape: {tok_embeddings.shape}")
-        # print(f"cls_emb shape: {cls_emb.shape}")
-        # print(f"t_emb shape: {t_emb.shape}")
-
+        ctx_emb = torch.cat([cls_emb, t_emb], 1)
+        
         # Position embedding
         pos_embeddings = self.pos_emb        
-        x = all_emb + pos_embeddings
+        x = tok_embeddings + pos_embeddings
 
         # transformer forward pass
         x = self.first_layer(x)
-        x, attn = self.transformer(x) if not self.ignore_attn_to_source else self.transformer(x, attn_mask=self.build_ignore_source_mask(x.size(0), x.size(1), w*h, device=x.device))
-        x = self.final_layer(x)
+        x, attn = self.transformer(x, ctx_emb)
+        #x = self.final_layer(x)
         x = x[:, : w*h, :]
         # premuate x to b, d, w, h
         b, hw, d = x.shape
@@ -310,6 +403,11 @@ class MaskTransformer(nn.Module):
         
         # For label token queries, disallow attention to other label tokens by default. 
         mask[num_img_tokens:, num_img_tokens:] = torch.eye(total_tokens - num_img_tokens, dtype=torch.bool, device=device)
+        
+        #mask = mask.unsqueeze(0).unsqueeze(0) 
+        #mask = mask.expand(batch_size, self.heads, total_tokens, total_tokens)  
+        #mask = mask.to(dtype=torch.float32) 
+        #mask = mask.masked_fill(mask == 0, float('-inf'))  
 
         return mask
 

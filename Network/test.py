@@ -129,7 +129,7 @@ class Attention(nn.Module):
 
         if self.fused_attn:
             # If using fused attention, pass the mask to the PyTorch function (if supported)
-            #attn_mask = torch.clamp(attn_mask, min=-1e4) 
+            attn_mask = torch.clamp(attn_mask, min=-1e4) 
             x = F.scaled_dot_product_attention(
                 q, k, v,
                 dropout_p=self.attn_drop.p if self.training else 0.,
@@ -157,44 +157,52 @@ class Attention(nn.Module):
         x = self.proj(x)
         x = self.proj_drop(x)
         return x, attn
+"""
+class TransformerEncoder(nn.Module):
+
+"""
+class AdaptiveLayerNorm(nn.Module):
+    """
+    Adaptive LayerNorm (AdaLN) for conditioning (like in DiT)
+    """
+    def __init__(self, hidden_size):
+        super().__init__()
+        self.norm = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
+        self.modulation = nn.Sequential(
+            nn.SiLU(),
+            nn.Linear(hidden_size, 2 * hidden_size, bias=True)
+        )
+    
+    def forward(self, x, c):
+        shift, scale = self.modulation(c).chunk(2, dim=1)
+        return self.norm(x) * (1 + scale.unsqueeze(1)) + shift.unsqueeze(1)
 
 class TransformerEncoder(nn.Module):
     def __init__(self, dim, depth, heads, mlp_dim, dropout=0., qk_norm=False):
-        """ Initialize the Attention module.
-            :param:
-                dim       -> int : number of hidden dimension of attention
-                depth     -> int : number of layer for the transformer
-                heads     -> int : Number of heads
-                mlp_dim   -> int : number of hidden dimension for mlp
-                dropout   -> float : Dropout rate
-        """
         super().__init__()
         self.layers = nn.ModuleList([])
-        for i in range(depth):
-            dropout_i = dropout if i != depth - 1 else 0
+        for _ in range(depth):
             self.layers.append(nn.ModuleList([
-                PreNorm(dim, Attention(dim, heads, dropout=dropout_i, qk_norm=qk_norm)),
-                PreNorm(dim, FeedForward(dim, mlp_dim, dropout=dropout_i))
+                AdaptiveLayerNorm(dim),  # AdaLN before attention
+                nn.MultiheadAttention(embed_dim=dim, num_heads=heads, dropout=dropout),
+                AdaptiveLayerNorm(dim),  # AdaLN before MLP
+                nn.Sequential(
+                    nn.Linear(dim, mlp_dim),
+                    nn.GELU(),
+                    nn.Linear(mlp_dim, dim),
+                    nn.Dropout(dropout)
+                )
             ]))
 
-    def forward(self, x, attn_mask=None):
-        """ Forward pass through the Attention module.
-            :param:
-                x -> torch.Tensor: Input tensor
-            :return
-                x -> torch.Tensor: Output of the Transformer
-                l_attn -> list(torch.Tensor): list of the attention
-        """
-        l_attn = []
-        for idx, (attn, ff) in enumerate(self.layers):
-            attention_value, attention_weight = attn(x, attn_mask=attn_mask)
-            x = attention_value + x
-            x = ff(x) + x
-            l_attn.append(attention_weight)
-        return x, l_attn
+    def forward(self, x, c):
+        for adaLN1, attn, adaLN2, ff in self.layers:
+            x = x + attn(adaLN1(x, c), x, x, need_weights=False)[0]
+            x = x + ff(adaLN2(x, c))
+        return x
+
 
 class MaskTransformer(nn.Module):
-    def __init__(self, img_size=28, num_tokens= 8 ,hidden_dim=128, codebook_size=1024, depth=7, heads=8, mlp_dim=1040, nconcepts=3, dropout=0.1, nclass=2, ignore_attn_to_source=False, qk_norm=False):
+    def __init__(self, img_size=28, num_tokens= 7 ,hidden_dim=128, codebook_size=1024, depth=7, heads=8, mlp_dim=1040, dropout=0.1, nclass=2, ignore_attn_to_source=False, qk_norm=False):
         """ Initialize the Transformer model.
             :param:
                 img_size       -> int:     Input image size (default: 256)
@@ -209,12 +217,11 @@ class MaskTransformer(nn.Module):
 
         super().__init__()
         self.nclass = nclass
-        self.nconcepts = nconcepts
         self.num_tokens = num_tokens
         self.patch_size = img_size // num_tokens
         self.codebook_size = codebook_size
         self.heads = heads
-        self.class_emb = nn.Embedding(nclass*nconcepts, hidden_dim)  # +1 for the mask of the viz token, +1 for mask of the class
+        self.class_emb = nn.Embedding(nclass, hidden_dim)  # +1 for the mask of the viz token, +1 for mask of the class
         self.tok_emb = nn.Linear(hidden_dim, hidden_dim) 
         self.pos_emb = nn.init.trunc_normal_(nn.Parameter(torch.zeros(1, (self.num_tokens*self.num_tokens)+3 +1 , hidden_dim)), 0., 0.02) #+1 for time
         self.time_emb = nn.Sequential(
@@ -234,11 +241,11 @@ class MaskTransformer(nn.Module):
         )
 
         self.transformer = TransformerEncoder(dim=hidden_dim, depth=depth, heads=heads, mlp_dim=mlp_dim, dropout=dropout, qk_norm=qk_norm)
-        self.final_layer = nn.Linear(hidden_dim, hidden_dim)
+        
         # Bias for the last linear output
         self.ignore_attn_to_source = ignore_attn_to_source
 
-    def forward(self, img_token, y, t ,drop_label=None, return_attn=False):
+    def forward(self, img_token, t, y=None ,drop_label=None, return_attn=False):
         """ Forward.
             :param:
                 img_token      -> torch.LongTensor: bsize x 16 x 16, the encoded image tokens
@@ -250,11 +257,10 @@ class MaskTransformer(nn.Module):
                 attn:          -> list(torch.FloatTensor): list of attention for visualization
         """
         b, d, w, h= img_token.size()
-        #print(y)
-        y = torch.stack(y, dim= 1) #if y is not None else None
+        y = torch.stack([i for i in y ], dim= 1) if y is not None else None
         if y is not None:
             #print(f"y shape: {y.shape}")
-            cls_token = y.view(b, -1) + self.nclass*torch.arange(self.nconcepts, device=y.device) # Shift the class token by the amount of codebook # +1 not 33 
+            cls_token = y.view(b, -1) #+ self.codebook_size + 1  # Shift the class token by the amount of codebook # +1 not 33 
             if drop_label is not None:
                 cls_token[drop_label.long()] = self.codebook_size + 1 + self.nclass  # Drop condition
             #input = torch.cat([img_token.view(b, -1), cls_token.view(b, -1)], -1)  # concat visual tokens and class tokens
@@ -269,11 +275,7 @@ class MaskTransformer(nn.Module):
         t_emb = self.time_emb(t)  
         t_emb = t_emb.unsqueeze(1)
         all_emb = torch.cat([tok_embeddings ,cls_emb, t_emb], 1)
-        # print(f"all_emb shape: {all_emb.shape}")
-        # print(f"tok_embeddings shape: {tok_embeddings.shape}")
-        # print(f"cls_emb shape: {cls_emb.shape}")
-        # print(f"t_emb shape: {t_emb.shape}")
-
+        
         # Position embedding
         pos_embeddings = self.pos_emb        
         x = all_emb + pos_embeddings
@@ -281,7 +283,6 @@ class MaskTransformer(nn.Module):
         # transformer forward pass
         x = self.first_layer(x)
         x, attn = self.transformer(x) if not self.ignore_attn_to_source else self.transformer(x, attn_mask=self.build_ignore_source_mask(x.size(0), x.size(1), w*h, device=x.device))
-        x = self.final_layer(x)
         x = x[:, : w*h, :]
         # premuate x to b, d, w, h
         b, hw, d = x.shape
@@ -289,7 +290,7 @@ class MaskTransformer(nn.Module):
         c_h = int(hw ** 0.5)
         x = x.permute(0, 2, 1)
         x = x.reshape(b, d, c_h, c_h)
-        #print(f"Mean: {x.mean().item()}, Std: {x.std().item()}, Min: {x.min().item()}, Max: {x.max().item()}")
+        print(f"Mean: {x.mean().item()}, Std: {x.std().item()}, Min: {x.min().item()}, Max: {x.max().item()}")
 
         return x 
     
@@ -310,6 +311,77 @@ class MaskTransformer(nn.Module):
         
         # For label token queries, disallow attention to other label tokens by default. 
         mask[num_img_tokens:, num_img_tokens:] = torch.eye(total_tokens - num_img_tokens, dtype=torch.bool, device=device)
+        
+        mask = mask.unsqueeze(0).unsqueeze(0) 
+        mask = mask.expand(batch_size, self.heads, total_tokens, total_tokens)  
+        mask = mask.to(dtype=torch.float32) 
+        mask = mask.masked_fill(mask == 0, float('-inf'))  
 
         return mask
+    
+    
+class EmbedFC(nn.Module):
+    def __init__(self, input_dim, emb_dim):
+        super(EmbedFC, self).__init__()
+        self.input_dim = input_dim
+        self.model = nn.Sequential(
+            nn.Linear(input_dim, emb_dim),
+            nn.GELU(),
+            nn.Linear(emb_dim, emb_dim)
+        )
 
+    def forward(self, x):
+        print(f"x: {x.shape}, dtype: {x.dtype}")
+        x = x.view(-1, self.input_dim)
+        return self.model(x)
+
+from Network.dit import TimestepEmbedder
+from Network.dit import LabelEmbedder
+from Network.dit import FinalLayer
+
+class VisionTransformer(nn.Module):
+    def __init__(self, input_size=7, depth=12, hidden_size=384,
+                 patch_size=1, num_heads=6, num_concepts=3, 
+                 in_channels=128, out_channels=128 ,learn_sigma=False, **kwargs):
+        super().__init__()
+        self.hidden_dim = hidden_size
+        self.nclass = 2
+        self.input_size = input_size
+        self.num_concepts = num_concepts
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        #self.x_embedder = PatchEmbed(input_size, patch_size, in_channels, hidden_size, bias=True)
+        self.x_embedder = nn.Conv2d(in_channels, hidden_size, kernel_size=patch_size, stride=patch_size, bias=True)
+        
+        self.t_embedder = TimestepEmbedder(hidden_size)
+        self.y_embedder = nn.ModuleList([LabelEmbedder(self.nclass, hidden_size, 0)  for _ in range(self.num_concepts)])
+        self.pos_embed = nn.Parameter(torch.zeros(1, input_size*input_size, hidden_size), requires_grad=False)
+
+        # Transformer Encoder
+        self.transformer = TransformerEncoder(dim=hidden_size, depth=depth, heads=num_heads, mlp_dim=int(4.0*hidden_size), dropout=0)
+
+        # Final projection
+        self.final_layer = FinalLayer(hidden_size, patch_size, out_channels)
+
+    def forward(self, x, t, y):
+        #print(f"x emb:{self.x_embedder(x).shape}, self.pos_emb: {self.pos_embed.shape}")
+        x = self.x_embedder(x)
+        x = x.flatten(2).transpose(1, 2)
+        #x = x.permute(0, 2, 3, 1)
+        #print(f"x emb:{x.shape}, self.pos_emb: {self.pos_embed.shape}")
+
+        x = x + self.pos_embed  # (N, T, D), where T = H * W / patch_size ** 2
+        t = self.t_embedder(t.squeeze())                   # (N, D)
+        y = [self.y_embedder[i](y[i], self.training) for i in range(self.num_concepts)]
+        c = t + sum(y)                              # (N, D)
+
+        x = self.transformer(x, c)                      # (N, T, D)
+        x = self.final_layer(x, c)
+        #reshape x from [64, 49, 128]) to [64, 128, 7, 7]
+        b, hw, d = x.shape
+        c_h = int(hw ** 0.5)
+        assert c_h * c_h == hw
+        x = x.permute(0, 2, 1)
+        x = x.reshape(b, d, c_h, c_h)
+
+        return x
