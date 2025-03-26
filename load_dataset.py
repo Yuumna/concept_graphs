@@ -47,20 +47,20 @@ class my_dataset(Dataset):
 
 
     def __getitem__(self, index):
-       if self.training:
+        if self.training:
            ipath = random.randint(0, len(self.train_image_paths)-1)
            img_path = self.train_image_paths[ipath]
-       else:
+        else:
            ipath = random.randint(0, len(self.test_image_paths)-1)
            img_path = self.test_image_paths[ipath]
             
-       img = Image.open(img_path).convert('RGB')
-       if self.transform is not None:
+        img = Image.open(img_path).convert('RGB')
+        if self.transform is not None:
            img = self.transform(img)
    
-       name_labels = img_path.split("_")[-2]
+        name_labels = img_path.split("_")[-2]
        
-       if self.dataset == "single-body_2d_3classes":
+        if self.dataset == "single-body_2d_3classes":
            with open(img_path.replace(".png", ".json"), 'r') as f:
                my_dict = json.loads(f.read())
                _size = my_dict[0]
@@ -93,11 +93,11 @@ class my_dataset(Dataset):
                label = {0: int(name_labels[0]), 1: color, 2: size} # second try
         
        
-       elif "celeba" in self.dataset:
+        elif "celeba" in self.dataset:
            label = {i: int(name_labels[i]) for i in range(3)}
 
-
-       return img, label 
+        #print(f"image_shape: {img.shape}")
+        return img, label 
 
     def __len__(self):
         return self.num_samples

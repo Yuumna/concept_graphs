@@ -338,9 +338,11 @@ class EmbedFC(nn.Module):
 from Network.dit import TimestepEmbedder
 from Network.dit import LabelEmbedder
 from Network.dit import FinalLayer
+from Network.dit import DiTBlock
+from Network.dit import get_2d_sincos_pos_embed
 
 class VisionTransformer(nn.Module):
-    def __init__(self, input_size=7, depth=12, hidden_size=384,
+    def __init__(self, input_size=8, depth=12, hidden_size=384,
                  patch_size=1, num_heads=6, num_concepts=3, 
                  in_channels=128, out_channels=128 ,learn_sigma=False, **kwargs):
         super().__init__()
@@ -350,6 +352,9 @@ class VisionTransformer(nn.Module):
         self.num_concepts = num_concepts
         self.in_channels = in_channels
         self.out_channels = out_channels
+        self.num_patches = input_size * input_size
+        print(f"num_classes: {self.nclass}, num_concepts: {num_concepts}, num_heads: {num_heads}, hidden_size:{hidden_size}, in_channels:{in_channels}, out_channels:{self.out_channels}")
+
         #self.x_embedder = PatchEmbed(input_size, patch_size, in_channels, hidden_size, bias=True)
         self.x_embedder = nn.Conv2d(in_channels, hidden_size, kernel_size=patch_size, stride=patch_size, bias=True)
         
@@ -358,12 +363,53 @@ class VisionTransformer(nn.Module):
         self.pos_embed = nn.Parameter(torch.zeros(1, input_size*input_size, hidden_size), requires_grad=False)
 
         # Transformer Encoder
-        self.transformer = TransformerEncoder(dim=hidden_size, depth=depth, heads=num_heads, mlp_dim=int(4.0*hidden_size), dropout=0)
-
+        #self.transformer = TransformerEncoder(dim=hidden_size, depth=depth, heads=num_heads, mlp_dim=int(4.0*hidden_size), dropout=0)
+        self.blocks = nn.ModuleList([
+            DiTBlock(hidden_size, num_heads, mlp_ratio=4.0) for _ in range(depth)
+        ])
         # Final projection
         self.final_layer = FinalLayer(hidden_size, patch_size, out_channels)
+        self.initialize_weights()
+        
+    def initialize_weights(self):
+        # Initialize transformer layers:
+        def _basic_init(module):
+            if isinstance(module, nn.Linear):
+                torch.nn.init.xavier_uniform_(module.weight)
+                if module.bias is not None:
+                    nn.init.constant_(module.bias, 0)
+        self.apply(_basic_init)
+
+        # Initialize (and freeze) pos_embed by sin-cos embedding:
+        pos_embed = get_2d_sincos_pos_embed(self.pos_embed.shape[-1], int(self.num_patches ** 0.5))
+        self.pos_embed.data.copy_(torch.from_numpy(pos_embed).float().unsqueeze(0))
+
+        # Initialize patch_embed like nn.Linear (instead of nn.Conv2d):
+        w = self.x_embedder.weight.data
+        nn.init.xavier_uniform_(w.view([w.shape[0], -1]))
+        nn.init.constant_(self.x_embedder.bias, 0)
+
+        # Initialize label embedding table:
+        for i in range(self.num_concepts):
+            nn.init.normal_(self.y_embedder[i].embedding_table.weight, std=0.02)
+
+        # Initialize timestep embedding MLP:
+        nn.init.normal_(self.t_embedder.mlp[0].weight, std=0.02)
+        nn.init.normal_(self.t_embedder.mlp[2].weight, std=0.02)
+
+        # Zero-out adaLN modulation layers in DiT blocks:
+        for block in self.blocks:
+            nn.init.constant_(block.adaLN_modulation[-1].weight, 0)
+            nn.init.constant_(block.adaLN_modulation[-1].bias, 0)
+
+        # Zero-out output layers:
+        nn.init.constant_(self.final_layer.adaLN_modulation[-1].weight, 0)
+        nn.init.constant_(self.final_layer.adaLN_modulation[-1].bias, 0)
+        nn.init.constant_(self.final_layer.linear.weight, 0)
+        nn.init.constant_(self.final_layer.linear.bias, 0)
 
     def forward(self, x, t, y):
+        print(f" y : {y}")
         #print(f"x emb:{self.x_embedder(x).shape}, self.pos_emb: {self.pos_embed.shape}")
         x = self.x_embedder(x)
         x = x.flatten(2).transpose(1, 2)
@@ -373,9 +419,12 @@ class VisionTransformer(nn.Module):
         x = x + self.pos_embed  # (N, T, D), where T = H * W / patch_size ** 2
         t = self.t_embedder(t.squeeze())                   # (N, D)
         y = [self.y_embedder[i](y[i], self.training) for i in range(self.num_concepts)]
+        print(f"y after embedder: {y}")
         c = t + sum(y)                              # (N, D)
-
-        x = self.transformer(x, c)                      # (N, T, D)
+        print(f"c shape: {c.shape}, x shape: {x.shape}, y shape: {y[0].shape}")
+        #x = self.transformer(x, c)                      # (N, T, D)
+        for block in self.blocks:
+            x = block(x, c)    
         x = self.final_layer(x, c)
         #reshape x from [64, 49, 128]) to [64, 128, 7, 7]
         b, hw, d = x.shape

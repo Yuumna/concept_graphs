@@ -119,7 +119,6 @@ class DiTBlock(nn.Module):
         shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.adaLN_modulation(c).chunk(6, dim=1)
         x = x + gate_msa.unsqueeze(1) * self.attn(modulate(self.norm1(x), shift_msa, scale_msa))
         x = x + gate_mlp.unsqueeze(1) * self.mlp(modulate(self.norm2(x), shift_mlp, scale_mlp))
-        print(f"x shape inisde block:{x.shape}")
         return x
 
 
@@ -169,7 +168,7 @@ class DiT(nn.Module):
         self.num_heads = num_heads
         self.num_concepts=num_concepts
         self.num_classes = num_classes
-
+        print(f"num_classes: {num_classes}, num_concepts: {num_concepts}, num_heads: {num_heads}, hidden_size:{hidden_size}, in_channels:{in_channels}, out_channels:{self.out_channels},")
         self.x_embedder = PatchEmbed(input_size, patch_size, in_channels, hidden_size, bias=True)
         self.t_embedder = TimestepEmbedder(hidden_size)
         self.y_embedder = nn.ModuleList([LabelEmbedder(num_classes, hidden_size, class_dropout_prob)  for _ in range(num_concepts)])
@@ -247,9 +246,6 @@ class DiT(nn.Module):
         t = self.t_embedder(t.squeeze())                   # (N, D)
         y = [self.y_embedder[i](y[i], self.training) for i in range(self.num_concepts)]
         #          # (N, D)
-        print(f"y:{sum(y).shape}")
-        print(f"self.pos_embed:{self.pos_embed.shape}")
-        print(f"x shape: {x.shape}")
         c = t + sum(y)                              # (N, D)
         for block in self.blocks:
             x = block(x, c)                      # (N, T, D)
