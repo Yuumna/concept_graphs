@@ -1,1 +1,0 @@
-python train.py  --experiment H32-train1 --our_labels False --n_epoch 1000 --model U-Net

@@ -1,7 +1,7 @@
 #!/bin/bash
 
 #SBATCH --partition lmbhiwidlc_gpu-rtx2080   # short: -p <partition_name>
-#SBATCH --job-name DiT_w/o_token_discrete           # short: -J <job name>
+#SBATCH --job-name DiT_w/o_token_cont           # short: -J <job name>
 
 #SBATCH --output logs/%x-%A-concept_graphs_ol.out   # STDOUT  %x and %A will be replaced by the job name and job id, respectively. short: -o logs/%x-%A-job_name.out
 #SBATCH --error logs/%x-%A-concept_graphs_ol.err    # STDERR  short: -e logs/%x-%A-job_name.out
@@ -31,7 +31,7 @@ conda activate newmask
 #move dataset to tmp using bash file in the current directory called dataset_to_tmp.sh
 # Running the job
 start=`date +%s`
-python train_merge.py --run_desc first_run --our_labels True  --model DiT  --batch_size 256 --n_epoch 6000
+python train_merge.py --run_desc first_run --our_labels False  --model DiT  --batch_size 256 --n_epoch 6000
 end=`date +%s`
 runtime=$((end-start))
 

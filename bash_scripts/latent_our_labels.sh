@@ -1,1 +1,0 @@
-python train_latent.py --dataset single-body_2d_3classes --our_labels True --label our_labels
