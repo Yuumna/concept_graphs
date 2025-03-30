@@ -141,7 +141,24 @@ class FinalLayer(nn.Module):
         x = self.linear(x)
         return x
 
+class EmbedFC(nn.Module):
+    def __init__(self, input_dim, emb_dim):
+        super(EmbedFC, self).__init__()
+        '''
+        generic one layer FC NN for embedding things  
+        '''
+        self.input_dim = input_dim
+        layers = [
+            nn.Linear(input_dim, emb_dim),
+            nn.GELU(),
+            nn.Linear(emb_dim, emb_dim),
+        ]
+        self.model = nn.Sequential(*layers)
 
+    def forward(self, x):
+        x = x.view(-1, self.input_dim)
+        return self.model(x)
+    
 class DiT(nn.Module):
     """
     Diffusion model with a Transformer backbone.
@@ -155,10 +172,10 @@ class DiT(nn.Module):
         depth=28,
         num_heads=16,
         mlp_ratio=4.0,
-        class_dropout_prob=0.1,
-        num_classes=2,
+        class_dropout_prob=0.0,
         learn_sigma=True,
         num_concepts=3,
+        **kwargs
     ):
         super().__init__()
         self.learn_sigma = learn_sigma
@@ -167,14 +184,27 @@ class DiT(nn.Module):
         self.patch_size = patch_size
         self.num_heads = num_heads
         self.num_concepts=num_concepts
-        self.num_classes = num_classes
-        print(f"num_classes: {num_classes}, num_concepts: {num_concepts}, num_heads: {num_heads}, hidden_size:{hidden_size}, in_channels:{in_channels}, out_channels:{self.out_channels},")
+        #self.n_classes = n_classes
+        self.n_classes = kwargs.get("n_classes")
+        discrete = kwargs.get("discrete")
+        #print(f"num_classes: {self.n_classes}, num_concepts: {num_concepts}, num_heads: {num_heads}, hidden_size:{hidden_size}, in_channels:{in_channels}, out_channels:{self.out_channels},")
         self.x_embedder = PatchEmbed(input_size, patch_size, in_channels, hidden_size, bias=True)
         self.t_embedder = TimestepEmbedder(hidden_size)
-        self.y_embedder = nn.ModuleList([LabelEmbedder(num_classes, hidden_size, class_dropout_prob)  for _ in range(num_concepts)])
+        is_discrete = [True, False, False] if not discrete else [True, True, True]
+        self.y_embedder = nn.ModuleList()
+
+        for i in range(num_concepts):
+            if is_discrete[i]:  # You define this list per concept
+                self.y_embedder.append(LabelEmbedder(self.n_classes[i], hidden_size, class_dropout_prob))
+            else:
+                self.y_embedder.append(EmbedFC(self.n_classes[i], hidden_size))  # input_dim[i] = 3 for RGB, 1 for scalar
+
+        #self.y_embedder = nn.ModuleList([LabelEmbedder(num_classes, hidden_size, class_dropout_prob)  for _ in range(num_concepts)])
+        #self.y_embedder_float = nn.ModuleList([EmbedFC(self.num_classes[iclass], hidden_size) for iclass in range(num_concepts)])
+
         num_patches = self.x_embedder.num_patches
         # Will use fixed sin-cos embedding:
-        print(f"num_patches :{num_patches}")
+        #print(f"num_patches :{num_patches}")
         self.pos_embed = nn.Parameter(torch.zeros(1, num_patches, hidden_size), requires_grad=False)
 
         self.blocks = nn.ModuleList([
@@ -202,8 +232,22 @@ class DiT(nn.Module):
         nn.init.constant_(self.x_embedder.proj.bias, 0)
 
         # Initialize label embedding table:
+        #for i in range(self.num_concepts):
+        #    nn.init.normal_(self.y_embedder[i].embedding_table.weight, std=0.02)
         for i in range(self.num_concepts):
-            nn.init.normal_(self.y_embedder[i].embedding_table.weight, std=0.02)
+            embedder = self.y_embedder[i]
+
+            if isinstance(embedder, LabelEmbedder):
+                # Discrete case: initialize embedding table
+                nn.init.normal_(embedder.embedding_table.weight, std=0.02)
+
+            elif isinstance(embedder, EmbedFC):
+                # Continuous case: initialize linear layers in the MLP
+                for layer in embedder.model:
+                    if isinstance(layer, nn.Linear):
+                        nn.init.normal_(layer.weight, std=0.02)
+                        if layer.bias is not None:
+                            nn.init.zeros_(layer.bias)
 
         # Initialize timestep embedding MLP:
         nn.init.normal_(self.t_embedder.mlp[0].weight, std=0.02)
@@ -244,12 +288,23 @@ class DiT(nn.Module):
         """
         x = self.x_embedder(x) + self.pos_embed  # (N, T, D), where T = H * W / patch_size ** 2
         t = self.t_embedder(t.squeeze())                   # (N, D)
-        y = [self.y_embedder[i](y[i], self.training) for i in range(self.num_concepts)]
-        #          # (N, D)
-        c = t + sum(y)                              # (N, D)
+        #y = [self.y_embedder[i](y[i], self.training) for i in range(self.num_concepts)]
+        y_emb = []
+        for i in range(self.num_concepts):
+            embedder = self.y_embedder[i]
+            if isinstance(embedder, LabelEmbedder):
+                y_i = embedder(y[i], self.training)
+            else:
+                y_i = embedder(y[i])
+            y_emb.append(y_i)
+        #print(f"y shapes after: {[y_emb[i].shape for i in range(self.num_concepts)]}")
+        #print(y_emb)
+        c = t + sum(y_emb)                              # (N, D)
         for block in self.blocks:
             x = block(x, c)                      # (N, T, D)
+        #print(f"x.shape before final layer: {x.shape}")
         x = self.final_layer(x, c)                # (N, T, patch_size ** 2 * out_channels)
+        #print(f"x.shape after final layer: {x.shape}")
         x = self.unpatchify(x)                   # (N, out_channels, H, W)
         return x
 
