@@ -22,9 +22,19 @@ from omegaconf import OmegaConf
 import sys
 sys.path.append("./image_tokenization")
 from image_tokenization.main import instantiate_from_config
-from Network.dit import DiT_models
-
+from Network.test import VisionTransformerTime
+from Network.dit_y_emb import DiT_models
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+def str2bool(v):
+    if isinstance(v, bool):
+        return v
+    if v.lower() in ("yes", "true", "t", "1"):
+        return True
+    elif v.lower() in ("no", "false", "f", "0"):
+        return False
+    else:
+        raise argparse.ArgumentTypeError("Boolean value expected.")
+
 
 
 parser = argparse.ArgumentParser()
@@ -44,11 +54,12 @@ parser.add_argument('--remove_node', default="None", type=str)
 parser.add_argument('--type_attention', default="", type=str)
 parser.add_argument('--pixel_size', default=28, type=int)
 parser.add_argument('--dataset', default="single-body_2d_3classes", type=str)
-parser.add_argument('--our_labels', default= False, type=bool)
+parser.add_argument('--our_labels', type=str2bool, default=False)
 parser.add_argument('--scheduler', default="", type=str)
 parser.add_argument('--seed', type=int, default=1)
-parser.add_argument('--token_folder', type=str, default="/work/dlclarge2/aliy-maskgit/maskgit/image_tokenization/vqgan_logs/2025-02-13T13-25-14_codebook_Third_synthetic_DLC13913381")#2025-02-13T18-09-06_codebook_10244_synthetic_DLC25267020")
+parser.add_argument('--token_folder', type=str, default="")#"/work/dlclarge2/aliy-maskgit/maskgit/image_tokenization/vqgan_logs/2025-02-13T13-25-14_codebook_Third_synthetic_DLC13913381")#2025-02-13T18-09-06_codebook_10244_synthetic_DLC25267020")
 parser.add_argument('--model', type=str, default="DiT", choices=["DiT", "U-Net"])
+parser.add_argument("--sr_latents", type=int, default=[])
 
 
 
@@ -341,42 +352,24 @@ class EmbedFC(nn.Module):
     def forward(self, x):
         x = x.view(-1, self.input_dim)
         return self.model(x)
-    
-
-# class EmbedFCID(nn.Module):
-#     def __init__(self, input_dim, emb_dim):
-#         super(EmbedFCID, self).__init__()
-#         '''
-#         generic one layer FC NN for embedding things  
-#         '''
-#         self.input_dim = input_dim
-#         layers = [
-#             nn.Embedding(input_dim, emb_dim),
-#             nn.GELU(),
-#             nn.Linear(emb_dim, emb_dim),
-#         ]
-#         self.model = nn.Sequential(*layers)
-
-#     def forward(self, x):
-#         return self.model(x)
 
 
 class ContextUnet(nn.Module):
-    def __init__(self, in_channels, n_feat = 256, n_classes=10, dataset="", type_attention="", discrete_classes=False):
+    def __init__(self, in_channels, n_feat = 256, n_classes=10, dataset="", type_attention="", token_folder=""):
         super(ContextUnet, self).__init__()
 
         self.in_channels = in_channels
         self.n_contexts = len(n_classes)
         self.n_feat = 2 * n_feat
         self.n_classes = n_classes
-        self.discrete_classes = discrete_classes
+        self.n_conv = 7 if not token_folder else 2
 
         self.init_conv = ResidualConvBlock(in_channels, n_feat, is_res=True)
 
         self.down1 = UnetDown(n_feat, n_feat, type_attention)
         self.down2 = UnetDown(n_feat, 2 * n_feat, type_attention)
 
-        self.to_vec = nn.Sequential(nn.AvgPool2d(2), nn.GELU())
+        self.to_vec = nn.Sequential(nn.AvgPool2d(self.n_conv), nn.GELU())
 
         self.timeembed1 = EmbedFC(1, 2*n_feat)
         self.timeembed2 = EmbedFC(1, 1*n_feat)
@@ -386,17 +379,12 @@ class ContextUnet(nn.Module):
         self.n_out1 = 2*n_feat 
         self.n_out2 = n_feat
 
-        # if self.discrete_classes:
-        #     self.contextembed1 = nn.ModuleList([EmbedFCID(self.n_classes[iclass], self.n_out1) for iclass in range(len(self.n_classes))])
-        #     self.contextembed2 = nn.ModuleList([EmbedFCID(self.n_classes[iclass], self.n_out2) for iclass in range(len(self.n_classes))])
-        # else:
         self.contextembed1 = nn.ModuleList([EmbedFC(self.n_classes[iclass], self.n_out1) for iclass in range(len(self.n_classes))])
         self.contextembed2 = nn.ModuleList([EmbedFC(self.n_classes[iclass], self.n_out2) for iclass in range(len(self.n_classes))])
 
 
-        n_conv = 2
         self.up0 = nn.Sequential(
-            nn.ConvTranspose2d(2 * n_feat, 2 * n_feat, n_conv, n_conv), 
+            nn.ConvTranspose2d(2 * n_feat, 2 * n_feat, self.n_conv, self.n_conv), 
             nn.GroupNorm(8, 2 * n_feat),
             nn.ReLU(),
         )
@@ -415,27 +403,27 @@ class ContextUnet(nn.Module):
 
         x = self.init_conv(x)
         down1 = self.down1(x)
-
         down2 = self.down2(down1)
         hiddenvec = self.to_vec(down2)
+
         temb1 = self.timeembed1(t).view(-1, int(self.n_feat), 1, 1)
         temb2 = self.timeembed2(t).view(-1, int(self.n_feat/2), 1, 1)
+
         # embed context, time step
         cemb1 = 0
         cemb2 = 0
         for ic in range(len(self.n_classes)):
             tmpc = c[ic]
             if tmpc.dtype==torch.int64: 
-                tmpc = nn.functional.one_hot(tmpc, num_classes=self.n_classes[ic])
-
-            cemb1 += self.contextembed1[ic](tmpc.type(torch.float)).view(-1, int(self.n_out1/1.), 1, 1)
-            cemb2 += self.contextembed2[ic](tmpc.type(torch.float)).view(-1, int(self.n_out2/1.), 1, 1)
-
+                tmpc = nn.functional.one_hot(tmpc, num_classes=self.n_classes[ic]).type(torch.float)
+            cemb1 += self.contextembed1[ic](tmpc).view(-1, int(self.n_out1/1.), 1, 1)
+            cemb2 += self.contextembed2[ic](tmpc).view(-1, int(self.n_out2/1.), 1, 1)
         up1 = self.up0(hiddenvec)
         up2 = self.up1(cemb1*up1 + temb1, down2)
         up3 = self.up2(cemb2*up2 + temb2, down1)
         out = self.out(torch.cat((up3, x), 1))
         return out
+
 
 
 def ddpm_schedules(beta1, beta2, T):
@@ -498,14 +486,13 @@ class DDPM(nn.Module):
             self.sqrtab[_ts, None, None, None] * x
             + self.sqrtmab[_ts, None, None, None] * noise
         )  
-
+        #print(f"noise shape: {noise.shape},x_t shape : {x_t.shape},")#original: {self.nn_model(x_t, c, _ts / self.n_T).shape}")
         return self.loss_mse(noise, self.nn_model(x_t, c, _ts / self.n_T)) #, context_mask))
 
     def sample(self, n_sample, c_gen, size, device, guide_w = 0.0):
 
         x_i = torch.randn(n_sample, *size).to(device)  # x_T ~ N(0, 1), sample initial noise
         #x_i = F.pad(x_i, (1, 0, 1, 0), value=0)
-        print(f"initial noise shape: {x_i.shape}")
         _c_gen = [tmpc_gen[:n_sample].to(device) for tmpc_gen in c_gen.values()] 
 
         #context_mask = torch.zeros_like(_c_gen[0]).to(device)
@@ -518,7 +505,7 @@ class DDPM(nn.Module):
             t_is = t_is.repeat(n_sample,1,1,1)
 
             z = torch.randn(n_sample, *size).to(device) if i > 1 else 0
-            eps = self.nn_model(x_i, _c_gen, t_is) #, context_mask)
+            eps = self.nn_model(x_i, _c_gen, t_is)#, return_latents = []) #, context_mask)
             x_i = (
                 self.oneover_sqrta[i] * (x_i - eps * self.mab_over_sqrtmab[i])
                 + self.sqrt_beta_t[i] * z
@@ -557,7 +544,7 @@ class DDPM(nn.Module):
         for i in reversed(range(0, self.n_T)):
             print(f'sampling timestep {i}',end='\r')
             t = torch.full((n_sample,), i, device=device, dtype=torch.long)
-            noise_pred = self.nn_model(x_t, _c_gen, t.float() / self.n_T)
+            noise_pred = self.nn_model(x_t, _c_gen, t.float() / self.n_T)#, return_latents = [])
             x_t = self.ddim_step(x_t, t, noise_pred)
 
             if i%20==0:
@@ -594,7 +581,6 @@ def training(args):
     num_samples = args.num_samples 
     pixel_size = args.pixel_size
     experiment = args.experiment 
-    label = args.label
     n_sample = args.n_sample 
     type_attention = args.type_attention 
     remove_node = args.remove_node 
@@ -602,8 +588,12 @@ def training(args):
     scheduler = args.scheduler
     token_folder = args.token_folder
     in_channels = 3 if not token_folder else 128
+    input_size = 28 if not token_folder else 8
+    patch_size = 4 if not token_folder else 1
     model = args.model
     description = args.run_desc
+    sr_latents = args.sr_latents
+
 
     torch.manual_seed(seed)
     if torch.cuda.is_available():
@@ -644,16 +634,33 @@ def training(args):
     now = datetime.datetime.now().strftime("%d-%m-%H-%M")
     label = "discrete" if our_labels else "continuous"
     space = "latent" if token_folder else "pixel"
-    save_dir = './output_old/' + dataset+'/'+model+ '/' + space + '/'+ label+ '/'+ f"{description}_" +experiment+'/'
+    
+    if description:
+        save_dir = 'results/output_all/' + dataset+'/'+model+ '/' + space + '/'+ label+ '/'+ description + '/'+ experiment+'/'
+    else:
+        save_dir = 'results/output_all/' + dataset+'/'+model+ '/' + space + '/'+ label+ '/'+ experiment+'/'
     if not os.path.isdir(save_dir): os.makedirs(save_dir)
     
     save_dir = save_dir +str(now) + "_"+ str(num_samples) + "_" + str(test_size) + "_" + str(n_feat) + "_" + str(n_T) + "_" + str(n_epoch) \
                         + "_" + str(lrate) + "_" + remove_node + "_" + str(alpha) + "_" + str(beta) + "_" + str(seed) + "/" #+ str(type_attention) + "/"
     if not os.path.isdir(save_dir): os.makedirs(save_dir)
+    kwargs ={}
     if model=="DiT":
-        loaded_model = DiT_models['concept_DIT_1']()
+        #loaded_model = VisionTransformerTime(input_size=input_size, depth=12, hidden_size=384,
+        #         patch_size=patch_size, num_heads=6, num_concepts=3, 
+        #         in_channels=in_channels, learn_sigma=False)
+        #kwargs["return_latents"] = []
+        #pass kwargs to DiT_models
+        kwargs["discrete"] = our_labels
+        kwargs["n_classes"] = n_classes
+        if token_folder:
+            loaded_model = DiT_models['concept_DIT_1'](**kwargs)
+        else:
+            loaded_model = DiT_models['concept_DIT_2'](**kwargs)
+        
+        
     elif model=="U-Net":
-        loaded_model = ContextUnet(in_channels=in_channels, n_feat=n_feat, n_classes=n_classes, dataset=dataset, type_attention=type_attention)
+        loaded_model = ContextUnet(in_channels=in_channels, n_feat=n_feat, n_classes=n_classes, dataset=dataset, type_attention=type_attention, token_folder=token_folder)
     ddpm = DDPM(nn_model=loaded_model, 
                                      betas=(lrate, 0.02), n_T=n_T, device=device, drop_prob=0.1, n_classes=n_classes)
     
