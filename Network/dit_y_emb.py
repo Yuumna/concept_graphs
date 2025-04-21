@@ -93,7 +93,37 @@ class LabelEmbedder(nn.Module):
         embeddings = self.embedding_table(labels)
         return embeddings
 
-
+class EmbedFC(nn.Module):
+    def __init__(self, input_dim, emb_dim, dropout_prob=0.0):
+        super(EmbedFC, self).__init__()
+        '''
+        generic one layer FC NN for embedding things  
+        '''
+        self.input_dim = input_dim
+        self.dropout_prob = dropout_prob
+        self.null_vector = nn.Parameter(torch.zeros(input_dim), requires_grad=True)
+        layers = [
+            nn.Linear(input_dim, emb_dim),
+            nn.GELU(),
+            nn.Linear(emb_dim, emb_dim),
+        ]
+        self.model = nn.Sequential(*layers)
+        
+    def token_drop(self, x, force_drop_ids=None):   
+        if x.ndim == 1:
+            x = x[:, None] 
+        if force_drop_ids is None:
+            drop_ids = torch.rand(x.shape[0], device=x.device) < self.dropout_prob
+        else:
+            drop_ids = force_drop_ids == 1
+        x = torch.where(drop_ids.unsqueeze(1), self.null_vector.unsqueeze(0), x)
+        return x
+    
+    def forward(self, x, train=True, force_drop_ids=None):
+        if train and (self.dropout_prob > 0 or force_drop_ids is not None):
+            x = self.token_drop(x, force_drop_ids)
+        x = x.view(-1, self.input_dim)
+        return self.model(x)
 #################################################################################
 #                                 Core DiT Model                                #
 #################################################################################
@@ -141,23 +171,6 @@ class FinalLayer(nn.Module):
         x = self.linear(x)
         return x
 
-class EmbedFC(nn.Module):
-    def __init__(self, input_dim, emb_dim):
-        super(EmbedFC, self).__init__()
-        '''
-        generic one layer FC NN for embedding things  
-        '''
-        self.input_dim = input_dim
-        layers = [
-            nn.Linear(input_dim, emb_dim),
-            nn.GELU(),
-            nn.Linear(emb_dim, emb_dim),
-        ]
-        self.model = nn.Sequential(*layers)
-
-    def forward(self, x):
-        x = x.view(-1, self.input_dim)
-        return self.model(x)
     
 class DiT(nn.Module):
     """
@@ -172,7 +185,7 @@ class DiT(nn.Module):
         depth=28,
         num_heads=16,
         mlp_ratio=4.0,
-        class_dropout_prob=0.0,
+        class_dropout_prob=0.1,
         learn_sigma=True,
         num_concepts=3,
         **kwargs
@@ -194,11 +207,11 @@ class DiT(nn.Module):
         self.y_embedder = nn.ModuleList()
 
         for i in range(num_concepts):
-            if is_discrete[i]:  # You define this list per concept
+            if is_discrete[i]:
                 self.y_embedder.append(LabelEmbedder(self.n_classes[i], hidden_size, class_dropout_prob))
             else:
-                self.y_embedder.append(EmbedFC(self.n_classes[i], hidden_size))  # input_dim[i] = 3 for RGB, 1 for scalar
-
+                self.y_embedder.append(EmbedFC(self.n_classes[i], hidden_size, class_dropout_prob))
+        
         #self.y_embedder = nn.ModuleList([LabelEmbedder(num_classes, hidden_size, class_dropout_prob)  for _ in range(num_concepts)])
         #self.y_embedder_float = nn.ModuleList([EmbedFC(self.num_classes[iclass], hidden_size) for iclass in range(num_concepts)])
 
@@ -426,7 +439,7 @@ def concept_DIT_1(**kwargs):
     return DiT(input_size=8, depth=12, hidden_size=384, patch_size=1, num_heads=6, num_concepts=3, in_channels=128, learn_sigma=False, **kwargs)
 
 def concept_DIT_2(**kwargs):
-    return DiT(input_size=28, depth=12, hidden_size=384, patch_size=4, num_heads=6, num_concepts=3, in_channels=3, learn_sigma=False, **kwargs)
+    return DiT(input_size=48, depth=12, hidden_size=384, patch_size=4, num_heads=6, num_concepts=3, in_channels=3, learn_sigma=False, **kwargs)
 
 DiT_models = {
     'DiT-XL/2': DiT_XL_2,  'DiT-XL/4': DiT_XL_4,  'DiT-XL/8': DiT_XL_8,
