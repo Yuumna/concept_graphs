@@ -1,0 +1,14 @@
+{
+  "gender": { 
+    "0": "Female", 
+    "1": "Male"
+  },
+  "face expresison": {
+    "0": "Smiling",
+    "1": "Not Smiling"
+  },
+  "hair color": { 
+    "0": "Black",
+    "1": "Blonde"
+  }
+}
