@@ -7,18 +7,57 @@ from tqdm import tqdm
 import numpy as np
 import json
 import argparse
-#path_images = 'output/single-body_2d_3classes/latent_None/H32-train1/06-03-16-37_5000_1.6_256_500_6000_0.0001_None_1500_2.0_1'
-# cont latent 
-#path_images= 'output/single-body_2d_3classes/latent_None/H32-train1/20-03-10-32_5000_1.6_256_500_6000_0.0001_None_1500_2.0_1'
-#path_images = 'output/single-body_2d_3classes/H32-train1/25-03-06-58_5000_1.6_256_500_1000_0.0001_None_1500_2.0_1'
-#model_path = '/work/dlclarge2/aliy-maskgit/concept_graphs/probes/linear-classifier_single-body_2d_3classes_multi-class.pt'
+
+import matplotlib.pyplot as plt
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+line_styles = {
+    "000": ("#22a6ff", "solid"),
+    "001": ("#22a6ff", "dashed"),
+    "010": ("#22a6ff", "dashdot"),
+    "100": ("#22a6ff", "dotted"),
+    "011": ("#ff95ca", "solid"),
+    "101": ("#ff95ca", "dashed"),
+    "110": ("#ff95ca", "dashdot"),
+    "111": ("#ff00ae", "solid"),
+}
+
+
+def get_dict(path):
+    
+    with open(path, "r") as f:
+        log_data = json.load(f)
+
+    data_by_concept = {}
+
+    for entry in log_data:
+        step = entry["step"]
+        concept_code = entry["concept_code"]
+        accuracy = entry["accuracy"] * 100
+
+        if concept_code not in data_by_concept:
+            data_by_concept[concept_code] = {"steps": [], "accuracies": []}
+
+        data_by_concept[concept_code]["steps"].append(step)
+        data_by_concept[concept_code]["accuracies"].append(accuracy)
+    sorted_keys = sorted(data_by_concept.keys())
+    for concept_code in sorted_keys:
+        steps = np.array(data_by_concept[concept_code]["steps"])
+        accuracies = np.array(data_by_concept[concept_code]["accuracies"])
+
+        sorted_indices = np.argsort(steps)
+        data_by_concept[concept_code]["steps"] = steps[sorted_indices]
+        data_by_concept[concept_code]["accuracies"] = accuracies[sorted_indices]
+    return data_by_concept
 
 
 class CustomDataset(Dataset):
-    def __init__(self, path):
+    def __init__(self, path, n_samples=1000): #=4):
+        self.n_samples = n_samples
         self.path = path
-        self.files = [f for f in os.listdir(path) if f.startswith('image_') and f.endswith('.npz') ]#and int(f.split('_ep')[-1].split('.')[0]) > 5000]
+        self.files = [f for f in os.listdir(path) if f.startswith('image_') and f.endswith('.npz') and int(f.split('_ep')[-1].split('.')[0]) < self.n_samples]
+        #get the first n_samples files
+        #self.files = self.files[:self.n_samples]
 
     def __len__(self):
         return len(self.files) 
@@ -49,7 +88,10 @@ class CustomDataset(Dataset):
         #print(f"Loaded image shape: {image.shape}, label:{labels}")
         return torch.tensor(image, dtype=torch.float32), labels, ep, label_str
 
-def evaluate(model, iterator, criterion, device):
+def evaluate(model, iterator, criterion, device, ipe=1):
+    """
+    Evaluate the model on the validation set.
+    """
 
     epoch_loss = 0
     #epoch_acc = 0
@@ -60,15 +102,15 @@ def evaluate(model, iterator, criterion, device):
     model.eval()
     with torch.no_grad():
         for (x, y, ep, label_str) in tqdm(iterator, desc="Evaluating", leave=False):
-            x = x.to(device)#[:50].to(device)
+            x = x[:50].to(device)
             #y = _y[key].to(device)
             x= x.squeeze(0)
-            y = [y[key].to(device).transpose(1,0).squeeze(1) for key in y.keys()]
+            y = [y[key][:50].to(device).transpose(1,0).squeeze(1) for key in y.keys()]
             y_pred = model(x)
             
             #print(f"y shape: {y.shape}, unique values: {torch.unique(y)}")
-            print(f"y before shape: {y[0].shape} , and y: {y[0]}")
-            print(f"y_pred[0] shape: {y_pred[0].shape}")
+            #print(f"y before shape: {y[0].shape} , and y: {y[0]}")
+            #print(f"y_pred[0] shape: {y_pred[0].shape}")
             # transpose y to match the shape of y_pred
             #print(f"y before shape: {y[0].shape}")
 
@@ -92,7 +134,7 @@ def evaluate(model, iterator, criterion, device):
             print(f"label_str: {label_str}, {label_str[0]}")
             # create json file with the logs of accuracy and ep for each class
             log_data.append({
-                "step": int(ep.item()),  # Convert tensor to integer
+                "step": int(ep.item()) * ipe,
                 "concept_code": str(label_str[0]),
                 "accuracy": acc_compositional.item()  # Single compositional accuracy value
             })
@@ -111,6 +153,27 @@ def evaluate(model, iterator, criterion, device):
     return epoch_loss / len(iterator), epoch_acc #/ len(iterator)
 
 
+def plot(data, line_styles, save_path):
+    plt.figure(figsize=(7, 5))
+
+    for concept_code in line_styles.keys():
+        steps = np.array(data[concept_code]["steps"])
+        accuracies = np.array(data[concept_code]["accuracies"])
+
+        color, linestyle = line_styles.get(concept_code, ("gray", "solid"))
+        plt.plot(steps, accuracies, linestyle=linestyle, color=color, label=concept_code)
+
+    plt.xscale("log")
+    plt.xlabel("Optimization Steps")
+    plt.ylabel("Accuracy (%)")
+    plt.title("Accuracy vs. Optimization Steps")
+
+    plt.legend(title="Concept Code", fontsize=9)
+    plt.grid(True, which="both", linestyle="--", linewidth=0.5)
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=300)
+    print(f"Plot saved to {save_path}")
+
 
 
 criterion = nn.CrossEntropyLoss()
@@ -118,12 +181,16 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Evaluate the model')
     parser.add_argument('--path_images', type=str, required=True, help='Path to the images directory')
     parser.add_argument('--model_path', type=str, default='/work/dlclarge2/aliy-maskgit/concept_graphs/probes/linear-classifier_single-body_2d_3classes_multi-class.pt', help='Path to the model file')
+    parser.add_argument('--n_steps', type=int, default=10000, help='Number of epochs to plot probes')
+    parser.add_argument('--ipe', type=int, default=1, help='Number of iterations per epoch')
     args = parser.parse_args()
     path_images = args.path_images
     model_path = args.model_path
+    n_epochs = args.n_steps / args.ipe
+    ipe = args.ipe
 
 
-    dataset = CustomDataset(path_images)
+    dataset = CustomDataset(path_images, n_samples=n_epochs)
     dataloader = DataLoader(dataset, shuffle=True)
 
     dataset = "single-body_2d_3classes"
@@ -142,11 +209,17 @@ if __name__ == "__main__":
     model.load_state_dict(torch.load(model_path))
     model.eval() 
     
-    test_loss, test_acc = evaluate(model, dataloader, criterion, device)
+    test_loss, test_acc = evaluate(model, dataloader, criterion, device, ipe=ipe)
     # save the results
     print(f'\tTest Loss: {test_loss:.3f} | test Acc: {test_acc[0]*100:.2f}% {test_acc[1]*100:.2f}% {test_acc[2]*100:.2f}%')
     with open(os.path.join(path_images, 'test_acc.txt'), 'w') as f:
         f.write(f'\tTest Loss: {test_loss:.3f} | test Acc: {test_acc[0]*100:.2f}% {test_acc[1]*100:.2f}% {test_acc[2]*100:.2f}%')
 
     # create plot
+    # Load the JSON data
+    json_path = os.path.join(path_images, "steps_acc.json")
+    data = get_dict(json_path)
+    # Plot the data
+    plot(data, line_styles, os.path.join(path_images, "plot_probes.png"))
+    print(f"Plot saved to {os.path.join(path_images, 'plot_probes.png')}")
 

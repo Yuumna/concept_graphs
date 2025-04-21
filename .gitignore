@@ -1,4 +1,5 @@
-output/
+output*
+results*
 output_old/
 concept_graphs.egg-info/
 image_tokenization/
@@ -6,3 +7,6 @@ image_tokenization/
 .vscode/
 logs/
 probes/*pt
+input*
+working*
+template*
