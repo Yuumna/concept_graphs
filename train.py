@@ -17,12 +17,21 @@ import argparse
 from einops import rearrange, repeat, reduce, pack, unpack
 import math
 import random
-import datetime
-
 
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
+def str2bool(v):
+    if isinstance(v, bool):
+        return v
+    if v.lower() in ("yes", "true", "t", "1"):
+        return True
+    elif v.lower() in ("no", "false", "f", "0"):
+        return False
+    else:
+        print("its either ")
+
+        raise argparse.ArgumentTypeError("Boolean value expected.")
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--lrate', default=1e-4, type=float)
@@ -42,8 +51,8 @@ parser.add_argument('--pixel_size', default=28, type=int)
 parser.add_argument('--dataset', default="single-body_2d_3classes", type=str)
 parser.add_argument('--scheduler', default="", type=str)
 parser.add_argument('--seed', type=int, default=1)
-
-
+parser.add_argument('--our_labels', type=str2bool, default=False)
+parser.add_argument('--with_alpha', type=str2bool, default=False)
 
 class ResidualConvBlock(nn.Module):
     def __init__(
@@ -311,6 +320,7 @@ class UnetUp(nn.Module):
         self.model = nn.Sequential(*layers)
 
     def forward(self, x, skip):
+        print(f"UnetUp: x shape: {x.shape}, skip shape: {skip.shape}")
         x = torch.cat((x, skip), 1)
         x = self.model(x)
         return x
@@ -363,7 +373,7 @@ class ContextUnet(nn.Module):
         self.contextembed2 = nn.ModuleList([EmbedFC(self.n_classes[iclass], self.n_out2) for iclass in range(len(self.n_classes))])
 
 
-        n_conv = 7
+        n_conv = 12
         self.up0 = nn.Sequential(
             nn.ConvTranspose2d(2 * n_feat, 2 * n_feat, n_conv, n_conv), 
             nn.GroupNorm(8, 2 * n_feat),
@@ -554,8 +564,9 @@ def training(args):
     remove_node = args.remove_node 
     seed = args.seed
     scheduler = args.scheduler
-    in_channels = 3 if "celeba" in dataset else 4
-
+    in_channels = 3 if "celeba" in dataset else 4 #3 #4
+    our_labels = args.our_labels
+    with_alpha = args.with_alpha
 
     torch.manual_seed(seed)
     if torch.cuda.is_available():
@@ -576,17 +587,21 @@ def training(args):
         "H22-train1": [2, 2],
         "default": [2, 3, 1]
     }
-    n_classes = experiment_classes.get(experiment, experiment_classes["default"])
+    n_classes = experiment_classes.get(experiment, experiment_classes["default"]) if not our_labels else [2, 2, 2]
 
     if "celeba" in dataset:
         n_classes = [2,2,2]
 
     tf = transforms.Compose([transforms.Resize((pixel_size,pixel_size)), transforms.ToTensor()])
+    cont_disc = "cont"
+    if our_labels:
+        cont_disc = "discrete"
+    if in_channels == 4:
+        cont_disc += "_w_alpha"
 
-    now = datetime.datetime.now().strftime("%d-%m-%H-%M")
-    save_dir = './output/'+dataset+'/' + experiment+'/'
+    save_dir = './results/output_all/'+f'U-Net_replicate_{cont_disc}/'+ dataset+'/'+'pixel_size_48'+'/'+experiment+'/'
     if not os.path.isdir(save_dir): os.makedirs(save_dir)
-    save_dir = save_dir +str(now) + "_" + str(num_samples) + "_" + str(test_size) + "_" + str(n_feat) + "_" + str(n_T) + "_" + str(n_epoch) \
+    save_dir = save_dir + str(num_samples) + "_" + str(test_size) + "_" + str(n_feat) + "_" + str(n_T) + "_" + str(n_epoch) \
                         + "_" + str(lrate) + "_" + remove_node + "_" + str(alpha) + "_" + str(beta) + "_" + str(seed) + "/" #+ str(type_attention) + "/"
     if not os.path.isdir(save_dir): os.makedirs(save_dir)
 
@@ -595,7 +610,7 @@ def training(args):
     ddpm.to(device)
 
 
-    train_dataset = load_dataset.my_dataset(tf, num_samples, dataset, configs=configs["train"], training=True, alpha=alpha, remove_node=remove_node)
+    train_dataset = load_dataset.my_dataset(tf, num_samples, dataset, configs=configs["train"], training=True, alpha=alpha, remove_node=remove_node, our_labels=our_labels, with_alpha=with_alpha)
     train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=1)
 
 
@@ -604,7 +619,7 @@ def training(args):
                 'test_loss_per_batch': {key: [] for key in configs["test"]}}
     output_configs = list(set(configs["test"] + configs["train"])) 
     for config in output_configs: 
-        test_dataset = load_dataset.my_dataset(tf, n_sample, dataset, configs=config, training=False, test_size=test_size) 
+        test_dataset = load_dataset.my_dataset(tf, n_sample, dataset, configs=config, training=False, test_size=test_size, our_labels=our_labels) 
         test_dataloaders[config] = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=1)
 
     optim = torch.optim.Adam(ddpm.parameters(), lr=lrate)
@@ -640,7 +655,7 @@ def training(args):
                     test_loss = ddpm(test_x, _test_c)
                     log_dict['test_loss_per_batch'][test_config].append(test_loss.item())
 
-            if (ep + 1) % 100 == 0 or ep >= (n_epoch - 5): 
+            if (ep + 1) % 1 == 0 or ep >= (n_epoch - 5): 
                 for test_config in output_configs: 
                     x_real, c_gen = next(iter(test_dataloaders[test_config]))
                     x_real = x_real[:n_sample].to(device)
@@ -665,5 +680,3 @@ def training(args):
 if __name__ == "__main__":
     args = parser.parse_args()
     training(args)
-
-

@@ -50,6 +50,7 @@ parser.add_argument('--n_sample', default=64, type=int)
 parser.add_argument('--n_epoch', default=100, type=int)
 parser.add_argument('--run_desc', default="default", type=str)
 parser.add_argument('--experiment', default="H32-train1", type=str)
+parser.add_argument('--log_freq', default=100, type=int)
 parser.add_argument('--remove_node', default="None", type=str)
 parser.add_argument('--type_attention', default="", type=str)
 parser.add_argument('--pixel_size', default=28, type=int)
@@ -355,15 +356,15 @@ class EmbedFC(nn.Module):
 
 
 class ContextUnet(nn.Module):
-    def __init__(self, in_channels, n_feat = 256, n_classes=10, dataset="", type_attention="", token_folder=""):
+    def __init__(self, in_channels, n_feat = 256, n_classes=10, dataset="", type_attention="", token_folder="", pixel_size=28):
         super(ContextUnet, self).__init__()
 
         self.in_channels = in_channels
         self.n_contexts = len(n_classes)
         self.n_feat = 2 * n_feat
         self.n_classes = n_classes
-        self.n_conv = 7 if not token_folder else 2
-
+        #self.n_conv = 7 if not token_folder else 2
+        self.n_conv = 12 if pixel_size == 48 else (2 if token_folder else 7)
         self.init_conv = ResidualConvBlock(in_channels, n_feat, is_res=True)
 
         self.down1 = UnetDown(n_feat, n_feat, type_attention)
@@ -588,7 +589,7 @@ def training(args):
     scheduler = args.scheduler
     token_folder = args.token_folder
     in_channels = 3 if not token_folder else 128
-    input_size = 28 if not token_folder else 8
+    input_size = args.pixel_size if not token_folder else 8
     patch_size = 4 if not token_folder else 1
     model = args.model
     description = args.run_desc
@@ -660,7 +661,7 @@ def training(args):
         
         
     elif model=="U-Net":
-        loaded_model = ContextUnet(in_channels=in_channels, n_feat=n_feat, n_classes=n_classes, dataset=dataset, type_attention=type_attention, token_folder=token_folder)
+        loaded_model = ContextUnet(in_channels=in_channels, n_feat=n_feat, n_classes=n_classes, dataset=dataset, type_attention=type_attention, token_folder=token_folder, pixel_size=pixel_size)
     ddpm = DDPM(nn_model=loaded_model, 
                                      betas=(lrate, 0.02), n_T=n_T, device=device, drop_prob=0.1, n_classes=n_classes)
     
@@ -732,7 +733,7 @@ def training(args):
                     test_loss = ddpm(test_x, _test_c)
                     log_dict['test_loss_per_batch'][test_config].append(test_loss.item())
 
-            if (ep + 1) % 100 == 0 or ep >= (n_epoch - 5): 
+            if (ep + 1) % args.log_freq == 0 or ep >= (n_epoch - 5): 
                 for test_config in output_configs: 
                     x_real, c_gen = next(iter(test_dataloaders[test_config]))
                     x_real = x_real[:n_sample].to(device)
