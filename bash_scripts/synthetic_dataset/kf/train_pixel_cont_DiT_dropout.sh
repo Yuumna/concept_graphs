@@ -9,11 +9,11 @@
 #GET two nodes
 # Define the amount of memory required per node
 #SBATCH --nodes=1
-#SBATCH --mem=64GB
+#SBATCH --mem=16GB
 #SBATCH --gres=gpu:1
 #SBATCH --ntasks-per-node=4
 #SBATCH --cpus-per-task=20
-#SBATCH --time=12:59:59
+#SBATCH --time=22:59:59
 
 
 cd /work/dlclarge2/aliy-maskgit/concept_graphs

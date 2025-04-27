@@ -31,7 +31,7 @@ echo "Conda environment activated"
 #move dataset to tmp using bash file in the current directory called dataset_to_tmp.sh
 # Running the job
 start=`date +%s`
-python train_merge_celebA.py --dataset celeba-3classes-smiling-10000_100 --run_desc pixel_48 --pixel_size 48  --our_labels False  --model DiT  --batch_size 64 --n_epoch 6000 --token_folder /work/dlclarge2/aliy-maskgit/concept_graphs/image_tokenization/vqgan_logs/2025-04-20T11-41-48_celebA_vqgan_128_256_DLC14537749
+python train_merge_celebA.py --dataset celeba-3classes-smiling-10000_100 --run_desc pixel_48_dropout --dropout 0.1 --pixel_size 48  --our_labels False  --model DiT  --batch_size 64 --n_epoch 6000 --token_folder /work/dlclarge2/aliy-maskgit/concept_graphs/image_tokenization/vqgan_logs/2025-04-20T11-41-48_celebA_vqgan_128_256_DLC14537749
 end=`date +%s`
 runtime=$((end-start))
 
