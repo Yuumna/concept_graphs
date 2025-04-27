@@ -61,7 +61,7 @@ parser.add_argument('--seed', type=int, default=1)
 parser.add_argument('--token_folder', type=str, default="")#"/work/dlclarge2/aliy-maskgit/maskgit/image_tokenization/vqgan_logs/2025-02-13T13-25-14_codebook_Third_synthetic_DLC13913381")#2025-02-13T18-09-06_codebook_10244_synthetic_DLC25267020")
 parser.add_argument('--model', type=str, default="DiT", choices=["DiT", "U-Net"])
 parser.add_argument("--sr_latents", type=int, default=[])
-
+parser.add_argument('--dropout', type=float, default=0.0)
 
 
 
@@ -363,8 +363,8 @@ class ContextUnet(nn.Module):
         self.n_contexts = len(n_classes)
         self.n_feat = 2 * n_feat
         self.n_classes = n_classes
-        #self.n_conv = 7 if not token_folder else 2
-        self.n_conv = 12 if pixel_size == 48 else (2 if token_folder else 7)
+        self.n_conv = 7 if not token_folder else 2
+        #self.n_conv = 12 if pixel_size == 48 else (2 if token_folder else 7)
         self.init_conv = ResidualConvBlock(in_channels, n_feat, is_res=True)
 
         self.down1 = UnetDown(n_feat, n_feat, type_attention)
@@ -422,6 +422,7 @@ class ContextUnet(nn.Module):
         up1 = self.up0(hiddenvec)
         up2 = self.up1(cemb1*up1 + temb1, down2)
         up3 = self.up2(cemb2*up2 + temb2, down1)
+        #print(f"up1 shape: {up1.shape},up2 shape: {up2.shape},up3 shape: {up3.shape}, x shape: {x.shape}")
         out = self.out(torch.cat((up3, x), 1))
         return out
 
@@ -594,7 +595,7 @@ def training(args):
     model = args.model
     description = args.run_desc
     sr_latents = args.sr_latents
-
+     
 
     torch.manual_seed(seed)
     if torch.cuda.is_available():
@@ -640,11 +641,14 @@ def training(args):
         save_dir = 'results/output_all/' + dataset+'/'+model+ '/' + space + '/'+ label+ '/'+ description + '/'+ experiment+'/'
     else:
         save_dir = 'results/output_all/' + dataset+'/'+model+ '/' + space + '/'+ label+ '/'+ experiment+'/'
-    if not os.path.isdir(save_dir): os.makedirs(save_dir)
-    
+        
     save_dir = save_dir +str(now) + "_"+ str(num_samples) + "_" + str(test_size) + "_" + str(n_feat) + "_" + str(n_T) + "_" + str(n_epoch) \
                         + "_" + str(lrate) + "_" + remove_node + "_" + str(alpha) + "_" + str(beta) + "_" + str(seed) + "/" #+ str(type_attention) + "/"
     if not os.path.isdir(save_dir): os.makedirs(save_dir)
+    
+    checkpoints_dir = save_dir + "checkpoints/"
+    if not os.path.isdir(checkpoints_dir): os.makedirs(checkpoints_dir)
+
     kwargs ={}
     if model=="DiT":
         #loaded_model = VisionTransformerTime(input_size=input_size, depth=12, hidden_size=384,
@@ -655,9 +659,9 @@ def training(args):
         kwargs["discrete"] = our_labels
         kwargs["n_classes"] = n_classes
         if token_folder:
-            loaded_model = DiT_models['concept_DIT_1'](**kwargs)
+            loaded_model = DiT_models['concept_DIT_1'](class_dropout_prob= args.dropout, **kwargs)
         else:
-            loaded_model = DiT_models['concept_DIT_2'](**kwargs)
+            loaded_model = DiT_models['concept_DIT_2'](class_dropout_prob= args.dropout, **kwargs)
         
         
     elif model=="U-Net":
@@ -718,7 +722,10 @@ def training(args):
             pbar.set_description(f"loss: {loss_ema:.4f}")
             optim.step()
         
-
+        if (ep + 1) % args.log_freq == 0 or ep >= (n_epoch - 5):
+            torch.save(ddpm.state_dict(), checkpoints_dir + f"ddpm_model_ep{ep}.pth")
+            print('saved model at ' + checkpoints_dir + f"ddpm_model_ep{ep}.pth")
+        
         ddpm.eval()
         with torch.no_grad():
 
