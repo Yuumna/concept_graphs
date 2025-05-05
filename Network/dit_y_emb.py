@@ -301,23 +301,19 @@ class DiT(nn.Module):
         """
         x = self.x_embedder(x) + self.pos_embed  # (N, T, D), where T = H * W / patch_size ** 2
         t = self.t_embedder(t.squeeze())                   # (N, D)
-        #y = [self.y_embedder[i](y[i], self.training) for i in range(self.num_concepts)]
         y_emb = []
         for i in range(self.num_concepts):
             embedder = self.y_embedder[i]
             if isinstance(embedder, LabelEmbedder):
                 y_i = embedder(y[i], self.training)
             else:
-                y_i = embedder(y[i])
+                y_i = embedder(y[i].float())
             y_emb.append(y_i)
-        #print(f"y shapes after: {[y_emb[i].shape for i in range(self.num_concepts)]}")
-        #print(y_emb)
+
         c = t + sum(y_emb)                              # (N, D)
         for block in self.blocks:
             x = block(x, c)                      # (N, T, D)
-        #print(f"x.shape before final layer: {x.shape}")
         x = self.final_layer(x, c)                # (N, T, patch_size ** 2 * out_channels)
-        #print(f"x.shape after final layer: {x.shape}")
         x = self.unpatchify(x)                   # (N, out_channels, H, W)
         return x
 
@@ -435,11 +431,34 @@ def DiT_S_4(**kwargs):
 def DiT_S_8(**kwargs):
     return DiT(depth=12, hidden_size=384, patch_size=8, num_heads=6, **kwargs)
 
+
+
 def concept_DIT_1(**kwargs):
     return DiT(input_size=8, depth=12, hidden_size=384, patch_size=1, num_heads=6, num_concepts=3, in_channels=128, learn_sigma=False, **kwargs)
+def concept_DIT_mg(**kwargs):
+    return DiT(input_size=7, depth=7, hidden_size=448, patch_size=1, num_heads=7, num_concepts=3, in_channels=128, learn_sigma=False, **kwargs)
+
+def concept_DIT_mg_pad(**kwargs):
+    return DiT(input_size=8, depth=7, hidden_size=448, patch_size=1, num_heads=7, num_concepts=3, in_channels=128, learn_sigma=False, **kwargs)
+
+def concept_DIT_1_celeb(**kwargs):
+    return DiT(input_size=12, depth=12, hidden_size=384, patch_size=1, num_heads=6, num_concepts=3, in_channels=128, learn_sigma=False, **kwargs)
 
 def concept_DIT_2(**kwargs):
+    return DiT(input_size=28, depth=12, hidden_size=384, patch_size=4, num_heads=6, num_concepts=3, in_channels=3, learn_sigma=False, **kwargs)
+def concept_DIT_2_celeb(**kwargs):
     return DiT(input_size=48, depth=12, hidden_size=384, patch_size=4, num_heads=6, num_concepts=3, in_channels=3, learn_sigma=False, **kwargs)
+def concept_DIT_2_mpi3d(**kwargs):
+    return DiT(input_size=64, depth=12, hidden_size=384, patch_size=4, num_heads=6, num_concepts=3, in_channels=3, learn_sigma=False, **kwargs)
+
+def concept_DIT_mg_all(**kwargs):
+    return DiT(depth=7, hidden_size=448, num_heads=7, num_concepts=3, learn_sigma=False, **kwargs)
+
+
+def DiT_B_4_celeb(**kwargs):
+    return DiT(depth=12, hidden_size=768, patch_size=4, num_heads=12, num_concepts=3, in_channels=3, learn_sigma=False, **kwargs)
+def DiT_B_4_celeb_latent(**kwargs):
+    return DiT(depth=12, hidden_size=768, patch_size=1, num_heads=12, num_concepts=3, in_channels=128, learn_sigma=False, **kwargs)
 
 DiT_models = {
     'DiT-XL/2': DiT_XL_2,  'DiT-XL/4': DiT_XL_4,  'DiT-XL/8': DiT_XL_8,
@@ -447,4 +466,8 @@ DiT_models = {
     'DiT-B/2':  DiT_B_2,   'DiT-B/4':  DiT_B_4,   'DiT-B/8':  DiT_B_8,
     'DiT-S/2':  DiT_S_2,   'DiT-S/4':  DiT_S_4,   'DiT-S/8':  DiT_S_8,
     'concept_DIT_1': concept_DIT_1, 'concept_DIT_2': concept_DIT_2, 
+    'concept_DIT_mg': concept_DIT_mg, 'concept_DIT_mg_all': concept_DIT_mg_all,
+    'concept_DIT_mg_pad': concept_DIT_mg_pad, 
+    'concept_DIT_1_celeb': concept_DIT_1_celeb, 'concept_DIT_2_celeb': concept_DIT_2_celeb,'DiT_B_4_celeb': DiT_B_4_celeb, 'DiT_B_4_celeb_latent': DiT_B_4_celeb_latent,
+    'concept_DIT_2_mpi3d': concept_DIT_2_mpi3d
 }

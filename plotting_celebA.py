@@ -64,7 +64,6 @@ def calc_acc(preds, obs, classifier, nclasses=3):
     for ii in range(nclasses): 
         #top_pred = y_pred[ii].argmax(1, keepdim=True).detach().numpy()
         top_pred = (y_pred[ii] > 0.5).int().detach().cpu().numpy()
-
         acc = np.array(top_pred[:,0]==int(obs[ii]), dtype=np.int64) 
         accs.append( acc ) 
         preds.append( top_pred[:,0] ) 

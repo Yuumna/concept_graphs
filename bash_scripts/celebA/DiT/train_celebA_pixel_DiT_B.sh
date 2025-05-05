@@ -31,7 +31,7 @@ conda activate newmask
 #move dataset to tmp using bash file in the current directory called dataset_to_tmp.sh
 # Running the job
 start=`date +%s`
-python train_merge_celebA.py --dataset celeba-3classes-smiling-10000_100 --run_desc DiT_B --pixel_size 48 --our_labels True  --model DiT  --batch_size 64 --n_epoch 6000
+python train_merge_celebA.py --dataset celeba-3classes-smiling-10000_100 --run_desc DiT_B_4 --pixel_size 48 --our_labels True  --model DiT  --batch_size 64 --n_epoch 6000
 end=`date +%s`
 runtime=$((end-start))
 

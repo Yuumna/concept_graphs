@@ -131,8 +131,8 @@ def learning_dynamics(dataset, experiment, prefix_dir="output/", start_ep=0, end
         x_real_plot = {}
         x_gen_plot = {}
         for itest_config, test_config in enumerate(configs[experiment]["test"] + configs[experiment]["train"]): 
-            #template_path = glob.glob('template/CLEVR_'+test_config+'_0*.png')
-            template_path = glob.glob('working/CelebA/celeba-3classes-smiling-10000_100/test/celeba_'+test_config+'_*.jpg')
+            template_path = glob.glob('template/CLEVR_'+test_config+'_0*.png')
+            #template_path = glob.glob('working/CelebA/celeba-3classes-smiling-10000_100/test/celeba_'+test_config+'_*.jpg')
             try:
                 x_real = Image.open(template_path[0])
                 x_real = tf(x_real).detach().numpy()
@@ -206,7 +206,7 @@ def learning_dynamics(dataset, experiment, prefix_dir="output/", start_ep=0, end
         x_values = np.arange(start_ep*scale_factor, start_ep*scale_factor+len(mult)* scale_factor * step, scale_factor * step)
         x_values+= scale_factor
         plt.plot(x_values[:-1], 
-                rescaled_conv(mult, N=10)[:-1]*100,
+                mult[:-1]*100,
                  c=color, lw=3, label=index, ls=lss[itest_config])
     ax.set_xscale('log')
     plt.xlabel("Optimization Steps", fontsize=20)

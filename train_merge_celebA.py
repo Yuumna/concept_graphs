@@ -50,7 +50,7 @@ parser.add_argument('--n_sample', default=64, type=int)
 parser.add_argument('--n_epoch', default=100, type=int)
 parser.add_argument('--run_desc', default="default", type=str)
 parser.add_argument('--experiment', default="H32-train1", type=str)
-parser.add_argument('--log_freq', default=1, type=int)
+parser.add_argument('--log_freq', default=100, type=int)
 parser.add_argument('--remove_node', default="None", type=str)
 parser.add_argument('--type_attention', default="", type=str)
 parser.add_argument('--pixel_size', default=48, type=int)
@@ -666,11 +666,20 @@ def training(args):
         kwargs["discrete"] = our_labels
         kwargs["n_classes"] = n_classes
         kwargs["input_size"] = input_size
+        kwargs["patch_size"] = patch_size
+        kwargs["in_channels"] = in_channels
+        loaded_model = DiT_models['concept_DIT_mg_all'](class_dropout_prob = args.dropout ,**kwargs)
+        #if token_folder:
+        #    loaded_model = DiT_models['DiT_B_4_celeb_latent'](class_dropout_prob = args.dropout ,**kwargs)
+        #else:
+        #    loaded_model = DiT_models['DiT_B_4_celeb'](class_dropout_prob = args.dropout ,**kwargs)
+
+        """        
         if token_folder:
             loaded_model = DiT_models['concept_DIT_1_celeb'](class_dropout_prob = args.dropout ,**kwargs)
         else:
             #loaded_model = DiT_models['concept_DIT_2_celeb'](class_dropout_prob = args.dropout ,**kwargs)
-            loaded_model = DiT_models['DiT_B_4'](class_dropout_prob = args.dropout ,**kwargs)
+            loaded_model = DiT_models['DiT_B_4'](class_dropout_prob = args.dropout ,**kwargs)"""
         
     elif model=="U-Net":
         loaded_model = ContextUnet(in_channels=in_channels, n_feat=n_feat, n_classes=n_classes, dataset=dataset, type_attention=type_attention, token_folder=token_folder, pixel_size=pixel_size)
@@ -730,7 +739,12 @@ def training(args):
             optim.step()
         
         if (ep + 1) % args.log_freq == 0 or ep >= (n_epoch - 5):
-            torch.save(ddpm.state_dict(), checkpoints_dir + f"ddpm_model_ep{ep}.pth")
+            torch.save({
+                'epoch': ep,
+                'model_state_dict': ddpm.state_dict(),
+                'optimizer_state_dict': optim.state_dict(),
+                'log_dict': log_dict
+            }, checkpoints_dir + f"ddpm_model_ep{ep}.pth")
             print('saved model at ' + checkpoints_dir + f"ddpm_model_ep{ep}.pth")
         
         ddpm.eval()
@@ -754,8 +768,6 @@ def training(args):
                     x_real = x_real[:n_sample].to(device)
                     if token_folder:
                         x_real_emb, _, [_, _, code] = vqgan.encode(x_real*2-1)
-                        if pixel_size == 24:
-                            x_real_emb = F.pad(x_real_emb, (1, 0, 1, 0), value=0)
                         x_real_ae_gen = vqgan.decode(x_real_emb[...,1:,1:])
                         x_real_ae_gen = x_real_ae_gen[0] if isinstance(x_real_ae_gen, tuple) else x_real_ae_gen
                         x_real_ae_gen = (x_real_ae_gen + 1)/2   
@@ -766,12 +778,12 @@ def training(args):
                         if scheduler=="DDIM":
                             x_tok, x_gen_store = ddpm.sample_ddim(n_sample, c_gen, (in_channels, 12, 12), device)
                             # how to remove by index the last element of x_gen F.pad(emb_test, (1, 0, 1, 0), value=0)
-                            x_gen = vqgan.decode(x_tok[...,1:,1:])
+                            x_gen = vqgan.decode(x_tok)
                             x_gen = x_gen[0] if isinstance(x_gen, tuple) else x_gen  # if dino loss is included
                             x_gen = (x_gen + 1)/2
                         else:
                             x_tok, x_gen_store = ddpm.sample(n_sample, c_gen, (in_channels, 12, 12), device, guide_w=0.0)
-                            x_gen = vqgan.decode(x_tok[...,1:,1:])
+                            x_gen = vqgan.decode(x_tok)
                             x_gen = x_gen[0] if isinstance(x_gen, tuple) else x_gen  # if dino loss is included
                             x_gen = (x_gen + 1)/2
                     else:

@@ -1,7 +1,7 @@
 #!/bin/bash
 
 #SBATCH --partition lmbhiwidlc_gpu-rtx2080   # short: -p <partition_name>
-#SBATCH --job-name celeb_DiT_w_token_drop          # short: -J <job name>
+#SBATCH --job-name celeb_DiT_B_w_token_drop          # short: -J <job name>
 
 #SBATCH --output logs/%x-%A-concept_graphs_ol.out   # STDOUT  %x and %A will be replaced by the job name and job id, respectively. short: -o logs/%x-%A-job_name.out
 #SBATCH --error logs/%x-%A-concept_graphs_ol.err    # STDERR  short: -e logs/%x-%A-job_name.out
@@ -31,7 +31,7 @@ echo "Conda environment activated"
 #move dataset to tmp using bash file in the current directory called dataset_to_tmp.sh
 # Running the job
 start=`date +%s`
-python train_merge_celebA.py --dataset celeba-3classes-smiling-10000_100 --run_desc pixel_48_dropout --dropout 0.1 --pixel_size 48  --our_labels False  --model DiT  --batch_size 64 --n_epoch 6000 --token_folder /work/dlclarge2/aliy-maskgit/concept_graphs/image_tokenization/vqgan_logs/2025-04-20T11-41-48_celebA_vqgan_128_256_DLC14537749
+python train_merge_celebA.py --dataset celeba-3classes-smiling-10000_100 --run_desc DiT_B_4_dropout_sec --dropout 0.1 --pixel_size 48  --our_labels True  --model DiT  --batch_size 64 --n_epoch 6000 --token_folder /work/dlclarge2/aliy-maskgit/concept_graphs/image_tokenization/vqgan_logs/2025-04-20T11-41-48_celebA_vqgan_128_256_DLC14537749
 end=`date +%s`
 runtime=$((end-start))
 

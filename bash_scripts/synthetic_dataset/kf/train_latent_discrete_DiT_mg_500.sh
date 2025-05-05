@@ -1,10 +1,10 @@
 #!/bin/bash
 
 #SBATCH --partition alldlc2_gpu-l40s   # short: -p <partition_name>
-#SBATCH --job-name DiT_w_token_discrete          # short: -J <job name>
+#SBATCH --job-name DiT_with_token_padding_disc_mg_500          # short: -J <job name>
 
-#SBATCH --output logs/%x-%A-concept_graphs.out   # STDOUT  %x and %A will be replaced by the job name and job id, respectively. short: -o logs/%x-%A-job_name.out
-#SBATCH --error logs/%x-%A-concept_graphs.err    # STDERR  short: -e logs/%x-%A-job_name.out
+#SBATCH --output logs/%x-%A-%j.out   # STDOUT  %x and %A will be replaced by the job name and job id, respectively. short: -o logs/%x-%A-job_name.out
+#SBATCH --error logs/%x-%A-%j.err    # STDERR  short: -e logs/%x-%A-job_name.out
 
 #GET two nodes
 # Define the amount of memory required per node
@@ -13,8 +13,7 @@
 #SBATCH --gres=gpu:1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=20
-#SBATCH --time=11:59:59
-#SBATCH --array=1
+#SBATCH --time=22:59:59
 
 
 cd /work/dlclarge2/aliy-maskgit/concept_graphs
@@ -34,10 +33,7 @@ conda activate vqgan
 # Running the job
 start=`date +%s`
 
-seed=$SLURM_ARRAY_TASK_ID
-n_epoch=6000
-
-python train_merge.py --run_desc "XAI_${seed}_${n_epoch}"  --pixel_size 28 --our_labels True  --model DiT --batch_size 256 --n_epoch $n_epoch --token_folder /work/dlclarge2/aliy-maskgit/maskgit/image_tokenization/vqgan_logs/2025-02-13T13-25-14_codebook_Third_synthetic_DLC13913381 --seed $seed
+python train_merge.py --run_desc MG_500_withpadding_disc  --pixel_size 28 --our_labels True  --model DiT  --drop_prob 0.0 --batch_size 256 --n_epoch 6000 --token_folder /work/dlclarge2/aliy-maskgit/maskgit/image_tokenization/vqgan_logs/2025-02-13T13-25-14_codebook_Third_synthetic_DLC13913381 --dit_mg True --n_T 500 
 end=`date +%s`
 runtime=$((end-start))
 

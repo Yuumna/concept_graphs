@@ -61,8 +61,9 @@ parser.add_argument('--seed', type=int, default=1)
 parser.add_argument('--token_folder', type=str, default="")#"/work/dlclarge2/aliy-maskgit/maskgit/image_tokenization/vqgan_logs/2025-02-13T13-25-14_codebook_Third_synthetic_DLC13913381")#2025-02-13T18-09-06_codebook_10244_synthetic_DLC25267020")
 parser.add_argument('--model', type=str, default="DiT", choices=["DiT", "U-Net"])
 parser.add_argument("--sr_latents", type=int, default=[])
-parser.add_argument('--dropout', type=float, default=0.0)
-
+parser.add_argument('--drop_prob', type=float, default=0.0)
+parser.add_argument('--guide_w', type=float, default=0.0)
+parser.add_argument('--dit_mg', type=str2bool, default=False)
 
 
 class ResidualConvBlock(nn.Module):
@@ -488,8 +489,15 @@ class DDPM(nn.Module):
             self.sqrtab[_ts, None, None, None] * x
             + self.sqrtmab[_ts, None, None, None] * noise
         )  
+        c_drop = []
+        for conept in c:
+            if random.random() < self.drop_prob:
+                print(f"drop conept {conept}")
+                c_drop.append(torch.zeros_like(conept))
+            else:
+                c_drop.append(conept)
         #print(f"noise shape: {noise.shape},x_t shape : {x_t.shape},")#original: {self.nn_model(x_t, c, _ts / self.n_T).shape}")
-        return self.loss_mse(noise, self.nn_model(x_t, c, _ts / self.n_T)) #, context_mask))
+        return self.loss_mse(noise, self.nn_model(x_t, c_drop, _ts / self.n_T)) #, context_mask))
 
     def sample(self, n_sample, c_gen, size, device, guide_w = 0.0):
 
@@ -507,7 +515,14 @@ class DDPM(nn.Module):
             t_is = t_is.repeat(n_sample,1,1,1)
 
             z = torch.randn(n_sample, *size).to(device) if i > 1 else 0
-            eps = self.nn_model(x_i, _c_gen, t_is)#, return_latents = []) #, context_mask)
+            if guide_w == 0:
+                eps = self.nn_model(x_i, _c_gen, t_is)#, return_latents = []) #, context_mask)
+            else:
+                print(f"guide_w: {guide_w}")
+                eps_cond = self.nn_model(x_i, _c_gen, t_is)
+                drop_c_gen = [torch.zeros_like(tmpc_gen) for tmpc_gen in _c_gen]
+                eps_uncond = self.nn_model(x_i, drop_c_gen, t_is)
+                eps = (1+ guide_w) * eps_cond - guide_w * eps_uncond
             x_i = (
                 self.oneover_sqrta[i] * (x_i - eps * self.mab_over_sqrtmab[i])
                 + self.sqrt_beta_t[i] * z
@@ -595,7 +610,12 @@ def training(args):
     model = args.model
     description = args.run_desc
     sr_latents = args.sr_latents
-     
+    drop_prob = args.drop_prob
+    guide_w = args.guide_w
+    dit_mg = args.dit_mg
+    
+
+    print(f"Seeding random number generator to {seed}")
 
     torch.manual_seed(seed)
     if torch.cuda.is_available():
@@ -658,16 +678,21 @@ def training(args):
         #pass kwargs to DiT_models
         kwargs["discrete"] = our_labels
         kwargs["n_classes"] = n_classes
-        if token_folder:
-            loaded_model = DiT_models['concept_DIT_1'](class_dropout_prob= args.dropout, **kwargs)
+        if token_folder and not dit_mg:
+            loaded_model = DiT_models['concept_DIT_1'](class_dropout_prob= args.drop_prob, **kwargs)
+        
+        elif token_folder and dit_mg:
+            print(f"using concept_DIT_mg as a comparable model to maskgit experiments")
+            loaded_model = DiT_models['concept_DIT_mg_pad'](class_dropout_prob= args.drop_prob, **kwargs)
+
         else:
-            loaded_model = DiT_models['concept_DIT_2'](class_dropout_prob= args.dropout, **kwargs)
+            loaded_model = DiT_models['concept_DIT_2'](class_dropout_prob= args.drop_prob, **kwargs)
         
         
     elif model=="U-Net":
         loaded_model = ContextUnet(in_channels=in_channels, n_feat=n_feat, n_classes=n_classes, dataset=dataset, type_attention=type_attention, token_folder=token_folder, pixel_size=pixel_size)
     ddpm = DDPM(nn_model=loaded_model, 
-                                     betas=(lrate, 0.02), n_T=n_T, device=device, drop_prob=0.1, n_classes=n_classes)
+                                     betas=(lrate, 0.02), n_T=n_T, device=device, drop_prob=drop_prob, n_classes=n_classes)
     
     # Print the number of parameters in ContextUnet
     total_params = sum(p.numel() for p in ddpm.nn_model.parameters())
@@ -712,9 +737,6 @@ def training(args):
                     emb = F.pad(emb, (1, 0, 1, 0), value=0)
                     x = emb
             
-            #save forward diff 
-            
-            ddpm.forward_diff(x, torch.tensor([0.0]).to(device))
             loss = ddpm(x, _c)
             log_dict['train_loss_per_batch'].append(loss.item())
             loss.backward()
@@ -761,7 +783,7 @@ def training(args):
                             x_gen = x_gen[0] if isinstance(x_gen, tuple) else x_gen  # if dino loss is included
                             x_gen = (x_gen + 1)/2
                         else:
-                            x_tok, x_gen_store = ddpm.sample(n_sample, c_gen, (in_channels, 8, 8), device, guide_w=0.0)
+                            x_tok, x_gen_store = ddpm.sample(n_sample, c_gen, (in_channels, 8, 8), device, guide_w=guide_w)
                             x_gen = vqgan.decode(x_tok[...,1:,1:])
                             x_gen = x_gen[0] if isinstance(x_gen, tuple) else x_gen  # if dino loss is included
                             x_gen = (x_gen + 1)/2
@@ -769,7 +791,7 @@ def training(args):
                         if scheduler=="DDIM": 
                             x_gen, x_gen_store = ddpm.sample_ddim(n_sample, c_gen, (in_channels, pixel_size, pixel_size), device)
                         else:
-                            x_gen, x_gen_store = ddpm.sample(n_sample, c_gen, (in_channels, pixel_size, pixel_size), device, guide_w=0.0)
+                            x_gen, x_gen_store = ddpm.sample(n_sample, c_gen, (in_channels, pixel_size, pixel_size), device, guide_w=guide_w)
 
                     np.savez_compressed(save_dir + f"image_"+test_config+"_ep"+str(ep)+".npz", x_gen=x_gen.detach().cpu().numpy()) 
                     print('saved image at ' + save_dir + f"image_"+test_config+"_ep"+str(ep)+".png")

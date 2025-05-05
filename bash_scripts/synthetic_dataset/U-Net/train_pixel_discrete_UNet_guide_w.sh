@@ -1,7 +1,7 @@
 #!/bin/bash
 
 #SBATCH --partition lmbhiwidlc_gpu-rtx2080   # short: -p <partition_name>
-#SBATCH --job-name DiT_w_token_discrete          # short: -J <job name>
+#SBATCH --job-name UNet_w/o_token_discrete_guide_w           # short: -J <job name>
 
 #SBATCH --output logs/%x-%A-concept_graphs_ol.out   # STDOUT  %x and %A will be replaced by the job name and job id, respectively. short: -o logs/%x-%A-job_name.out
 #SBATCH --error logs/%x-%A-concept_graphs_ol.err    # STDERR  short: -e logs/%x-%A-job_name.out
@@ -9,7 +9,7 @@
 #GET node
 # Define the amount of memory required per node
 #SBATCH --nodes=1
-#SBATCH --mem=16GB
+#SBATCH --mem=64GB
 #SBATCH --gres=gpu:1
 #SBATCH --ntasks-per-node=4
 #SBATCH --time=12:59:59
@@ -27,11 +27,11 @@ echo "Running job $SLURM_JOB_NAME using $SLURM_JOB_CPUS_PER_NODE cpus per node w
 # You can also comment out this line, and activate your environment in the login node before submitting the job
 . ~/.bashrc # Adjust to your path of Miniconda installation
 conda activate newmask
-echo "Conda environment activated"
+
 #move dataset to tmp using bash file in the current directory called dataset_to_tmp.sh
 # Running the job
 start=`date +%s`
-python train_merge.py --run_desc sec_run_validate  --our_labels True  --model DiT  --batch_size 256 --n_epoch 6000 --token_folder /work/dlclarge2/aliy-maskgit/maskgit/image_tokenization/vqgan_logs/2025-02-13T13-25-14_codebook_Third_synthetic_DLC13913381
+python train_merge.py --run_desc sec_run --our_labels True  --model U-Net  --batch_size 256 --n_epoch 6000 --drop_prob 0.1 --guide_w 2.5
 end=`date +%s`
 runtime=$((end-start))
 

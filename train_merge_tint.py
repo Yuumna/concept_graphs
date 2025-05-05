@@ -9,7 +9,7 @@ from torchvision.utils import save_image, make_grid
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation, PillowWriter
 import numpy as np
-import orig_dataloader as load_dataset
+import load_dataset
 import os
 import glob
 import json
@@ -17,9 +17,24 @@ import argparse
 from einops import rearrange, repeat, reduce, pack, unpack
 import math
 import random
-
-
+import datetime
+from omegaconf import OmegaConf
+import sys
+sys.path.append("./image_tokenization")
+from image_tokenization.main import instantiate_from_config
+from Network.test import VisionTransformerTime
+from Network.dit_y_emb import DiT_models
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+def str2bool(v):
+    if isinstance(v, bool):
+        return v
+    if v.lower() in ("yes", "true", "t", "1"):
+        return True
+    elif v.lower() in ("no", "false", "f", "0"):
+        return False
+    else:
+        raise argparse.ArgumentTypeError("Boolean value expected.")
+
 
 
 parser = argparse.ArgumentParser()
@@ -33,15 +48,22 @@ parser.add_argument('--n_T', default=500, type=int)
 parser.add_argument('--n_feat', default=256, type=int)
 parser.add_argument('--n_sample', default=64, type=int)
 parser.add_argument('--n_epoch', default=100, type=int)
+parser.add_argument('--run_desc', default="default", type=str)
 parser.add_argument('--experiment', default="H32-train1", type=str)
+parser.add_argument('--log_freq', default=100, type=int)
 parser.add_argument('--remove_node', default="None", type=str)
 parser.add_argument('--type_attention', default="", type=str)
 parser.add_argument('--pixel_size', default=28, type=int)
 parser.add_argument('--dataset', default="single-body_2d_3classes", type=str)
+parser.add_argument('--our_labels', type=str2bool, default=False)
 parser.add_argument('--scheduler', default="", type=str)
 parser.add_argument('--seed', type=int, default=1)
-parser.add_argument('--log_freq', type=int, default=1)
-
+parser.add_argument('--token_folder', type=str, default="")#"/work/dlclarge2/aliy-maskgit/maskgit/image_tokenization/vqgan_logs/2025-02-13T13-25-14_codebook_Third_synthetic_DLC13913381")#2025-02-13T18-09-06_codebook_10244_synthetic_DLC25267020")
+parser.add_argument('--model', type=str, default="DiT", choices=["DiT", "U-Net"])
+parser.add_argument("--sr_latents", type=int, default=[])
+parser.add_argument('--drop_prob', type=float, default=0.0)
+parser.add_argument('--guide_w', type=float, default=0.0)
+parser.add_argument('--dit_mg', type=str2bool, default=False)
 
 
 class ResidualConvBlock(nn.Module):
@@ -335,20 +357,21 @@ class EmbedFC(nn.Module):
 
 
 class ContextUnet(nn.Module):
-    def __init__(self, in_channels, n_feat = 256, n_classes=10, dataset="", type_attention=""):
+    def __init__(self, in_channels, n_feat = 256, n_classes=10, dataset="", type_attention="", token_folder="", pixel_size=28):
         super(ContextUnet, self).__init__()
 
         self.in_channels = in_channels
         self.n_contexts = len(n_classes)
         self.n_feat = 2 * n_feat
         self.n_classes = n_classes
-
+        self.n_conv = 7 if not token_folder else 2
+        #self.n_conv = 12 if pixel_size == 48 else (2 if token_folder else 7)
         self.init_conv = ResidualConvBlock(in_channels, n_feat, is_res=True)
 
         self.down1 = UnetDown(n_feat, n_feat, type_attention)
         self.down2 = UnetDown(n_feat, 2 * n_feat, type_attention)
 
-        self.to_vec = nn.Sequential(nn.AvgPool2d(7), nn.GELU())
+        self.to_vec = nn.Sequential(nn.AvgPool2d(self.n_conv), nn.GELU())
 
         self.timeembed1 = EmbedFC(1, 2*n_feat)
         self.timeembed2 = EmbedFC(1, 1*n_feat)
@@ -362,9 +385,8 @@ class ContextUnet(nn.Module):
         self.contextembed2 = nn.ModuleList([EmbedFC(self.n_classes[iclass], self.n_out2) for iclass in range(len(self.n_classes))])
 
 
-        n_conv = 7
         self.up0 = nn.Sequential(
-            nn.ConvTranspose2d(2 * n_feat, 2 * n_feat, n_conv, n_conv), 
+            nn.ConvTranspose2d(2 * n_feat, 2 * n_feat, self.n_conv, self.n_conv), 
             nn.GroupNorm(8, 2 * n_feat),
             nn.ReLU(),
         )
@@ -398,12 +420,13 @@ class ContextUnet(nn.Module):
                 tmpc = nn.functional.one_hot(tmpc, num_classes=self.n_classes[ic]).type(torch.float)
             cemb1 += self.contextembed1[ic](tmpc).view(-1, int(self.n_out1/1.), 1, 1)
             cemb2 += self.contextembed2[ic](tmpc).view(-1, int(self.n_out2/1.), 1, 1)
-
         up1 = self.up0(hiddenvec)
         up2 = self.up1(cemb1*up1 + temb1, down2)
         up3 = self.up2(cemb2*up2 + temb2, down1)
+        #print(f"up1 shape: {up1.shape},up2 shape: {up2.shape},up3 shape: {up3.shape}, x shape: {x.shape}")
         out = self.out(torch.cat((up3, x), 1))
         return out
+
 
 
 def ddpm_schedules(beta1, beta2, T):
@@ -466,12 +489,20 @@ class DDPM(nn.Module):
             self.sqrtab[_ts, None, None, None] * x
             + self.sqrtmab[_ts, None, None, None] * noise
         )  
-
-        return self.loss_mse(noise, self.nn_model(x_t, c, _ts / self.n_T)) #, context_mask))
+        c_drop = []
+        for conept in c:
+            if random.random() < self.drop_prob:
+                print(f"drop conept {conept}")
+                c_drop.append(torch.zeros_like(conept))
+            else:
+                c_drop.append(conept)
+        #print(f"noise shape: {noise.shape},x_t shape : {x_t.shape},")#original: {self.nn_model(x_t, c, _ts / self.n_T).shape}")
+        return self.loss_mse(noise, self.nn_model(x_t, c_drop, _ts))# / self.n_T)) #, context_mask))
 
     def sample(self, n_sample, c_gen, size, device, guide_w = 0.0):
 
         x_i = torch.randn(n_sample, *size).to(device)  # x_T ~ N(0, 1), sample initial noise
+        #x_i = F.pad(x_i, (1, 0, 1, 0), value=0)
         _c_gen = [tmpc_gen[:n_sample].to(device) for tmpc_gen in c_gen.values()] 
 
         #context_mask = torch.zeros_like(_c_gen[0]).to(device)
@@ -480,21 +511,28 @@ class DDPM(nn.Module):
         print()
         for i in range(self.n_T, 0, -1):
             print(f'sampling timestep {i}',end='\r')
-            t_is = torch.tensor([i / self.n_T]).to(device)
+            t_is = torch.tensor([i]).to(device)
             t_is = t_is.repeat(n_sample,1,1,1)
 
             z = torch.randn(n_sample, *size).to(device) if i > 1 else 0
-            eps = self.nn_model(x_i, _c_gen, t_is) #, context_mask)
+            if guide_w == 0:
+                eps = self.nn_model(x_i, _c_gen, t_is)#, return_latents = []) #, context_mask)
+            else:
+                print(f"guide_w: {guide_w}")
+                eps_cond = self.nn_model(x_i, _c_gen, t_is)
+                drop_c_gen = [torch.zeros_like(tmpc_gen) for tmpc_gen in _c_gen]
+                eps_uncond = self.nn_model(x_i, drop_c_gen, t_is)
+                eps = (1+ guide_w) * eps_cond - guide_w * eps_uncond
             x_i = (
                 self.oneover_sqrta[i] * (x_i - eps * self.mab_over_sqrtmab[i])
                 + self.sqrt_beta_t[i] * z
             )
+            
             if i%20==0:
                 x_i_store.append(x_i.detach().cpu().numpy())
         
         x_i_store = np.array(x_i_store)
         return x_i, x_i_store
-
 
     def ddim_step(self, x_t, t, noise_pred):
         """
@@ -523,7 +561,7 @@ class DDPM(nn.Module):
         for i in reversed(range(0, self.n_T)):
             print(f'sampling timestep {i}',end='\r')
             t = torch.full((n_sample,), i, device=device, dtype=torch.long)
-            noise_pred = self.nn_model(x_t, _c_gen, t.float() / self.n_T)
+            noise_pred = self.nn_model(x_t, _c_gen, t.float() / self.n_T)#, return_latents = [])
             x_t = self.ddim_step(x_t, t, noise_pred)
 
             if i%20==0:
@@ -532,7 +570,6 @@ class DDPM(nn.Module):
         x_i_store = np.array(x_i_store)
         return x_t, x_i_store
 
-    
 
 def training(args):
 
@@ -545,6 +582,7 @@ def training(args):
     beta = args.beta
     test_size = args.test_size
     dataset = args.dataset 
+    our_labels = args.our_labels
     num_samples = args.num_samples 
     pixel_size = args.pixel_size
     experiment = args.experiment 
@@ -553,8 +591,17 @@ def training(args):
     remove_node = args.remove_node 
     seed = args.seed
     scheduler = args.scheduler
-    in_channels = 3 if "celeba" in dataset else 4
-
+    token_folder = args.token_folder
+    in_channels = 3 if not token_folder else 128
+    input_size = args.pixel_size if not token_folder else 8
+    patch_size = 4 if not token_folder else 1
+    model = args.model
+    description = args.run_desc
+    sr_latents = args.sr_latents
+    drop_prob = args.drop_prob
+    guide_w = args.guide_w
+    dit_mg = args.dit_mg
+     
 
     torch.manual_seed(seed)
     if torch.cuda.is_available():
@@ -564,8 +611,18 @@ def training(args):
     torch.backends.cudnn.benchmark = False
     np.random.seed(seed)
     random.seed(seed)
-
-
+    if token_folder:
+        # loading tokenizer
+        with torch.no_grad():
+            vqgan_cfg_path = [p for p in os.listdir(os.path.join(token_folder, "configs")) if p.endswith("project.yaml")][0]
+            vqgan_ckpt_path = os.path.join(token_folder, "checkpoints", f"last.ckpt")
+            vqgan = instantiate_from_config(OmegaConf.load(os.path.join(token_folder, "configs", vqgan_cfg_path)).model).eval().cuda()
+            vqgan.load_state_dict(torch.load(vqgan_ckpt_path)["state_dict"]) 
+            vqgan = vqgan.eval()
+            #set grads of vqgan to false
+            for param in vqgan.parameters():
+                param.requires_grad = False
+    
     with open("config_category.json", 'r') as f:
          configs = json.load(f)[experiment]
 
@@ -573,28 +630,63 @@ def training(args):
     experiment_classes = {
         "H42-train1": [2, 3, 1, 1],
         "H22-train1": [2, 2],
-        "default": [2, 3, 1]
+        "default": [2, 3, 1],
     }
-    n_classes = experiment_classes.get(experiment, experiment_classes["default"])
-
+    n_classes = experiment_classes.get(experiment, experiment_classes["default"]) if not our_labels else [2, 2, 2]
     if "celeba" in dataset:
         n_classes = [2,2,2]
 
     tf = transforms.Compose([transforms.Resize((pixel_size,pixel_size)), transforms.ToTensor()])
 
-
-    save_dir = './output/'+dataset+'/'+experiment+'/'
-    if not os.path.isdir(save_dir): os.makedirs(save_dir)
-    save_dir = save_dir + str(num_samples) + "_" + str(test_size) + "_" + str(n_feat) + "_" + str(n_T) + "_" + str(n_epoch) \
+    # log the timestamp
+    now = datetime.datetime.now().strftime("%d-%m-%H-%M")
+    label = "discrete" if our_labels else "continuous"
+    space = "latent" if token_folder else "pixel"
+    
+    if description:
+        save_dir = 'results/output_all/' + dataset+'/'+model+ '/' + space + '/'+ label+ '/'+ description + '/'+ experiment+'/'
+    else:
+        save_dir = 'results/output_all/' + dataset+'/'+model+ '/' + space + '/'+ label+ '/'+ experiment+'/'
+        
+    save_dir = save_dir +str(now) + "_"+ str(num_samples) + "_" + str(test_size) + "_" + str(n_feat) + "_" + str(n_T) + "_" + str(n_epoch) \
                         + "_" + str(lrate) + "_" + remove_node + "_" + str(alpha) + "_" + str(beta) + "_" + str(seed) + "/" #+ str(type_attention) + "/"
     if not os.path.isdir(save_dir): os.makedirs(save_dir)
+    
+    checkpoints_dir = save_dir + "checkpoints/"
+    if not os.path.isdir(checkpoints_dir): os.makedirs(checkpoints_dir)
 
-    ddpm = DDPM(nn_model=ContextUnet(in_channels=in_channels, n_feat=n_feat, n_classes=n_classes, dataset=dataset, type_attention=type_attention), 
-                                     betas=(lrate, 0.02), n_T=n_T, device=device, drop_prob=0.1, n_classes=n_classes)
+    kwargs ={}
+    if model=="DiT":
+        #loaded_model = VisionTransformerTime(input_size=input_size, depth=12, hidden_size=384,
+        #         patch_size=patch_size, num_heads=6, num_concepts=3, 
+        #         in_channels=in_channels, learn_sigma=False)
+        #kwargs["return_latents"] = []
+        #pass kwargs to DiT_models
+        kwargs["discrete"] = our_labels
+        kwargs["n_classes"] = n_classes
+        if token_folder and not dit_mg:
+            loaded_model = DiT_models['concept_DIT_1'](class_dropout_prob= args.drop_prob, **kwargs)
+        
+        elif token_folder and dit_mg:
+            print(f"using concept_DIT_mg as a comparable model to maskgit experiments")
+            loaded_model = DiT_models['concept_DIT_mg'](class_dropout_prob= args.drop_prob, **kwargs)
+
+        else:
+            loaded_model = DiT_models['concept_DIT_2'](class_dropout_prob= args.drop_prob, **kwargs)
+        
+        
+    elif model=="U-Net":
+        loaded_model = ContextUnet(in_channels=in_channels, n_feat=n_feat, n_classes=n_classes, dataset=dataset, type_attention=type_attention, token_folder=token_folder, pixel_size=pixel_size)
+    ddpm = DDPM(nn_model=loaded_model, 
+                                     betas=(lrate, 0.02), n_T=n_T, device=device, drop_prob=drop_prob, n_classes=n_classes)
+    
+    # Print the number of parameters in ContextUnet
+    total_params = sum(p.numel() for p in ddpm.nn_model.parameters())
+    print(f"{model} model size: {total_params} parameters")
     ddpm.to(device)
 
 
-    train_dataset = load_dataset.my_dataset(tf, num_samples, dataset, configs=configs["train"], training=True, alpha=alpha, remove_node=remove_node)
+    train_dataset = load_dataset.my_dataset(tf, num_samples, dataset, configs=configs["train"], training=True, alpha=alpha, remove_node=remove_node, our_labels=our_labels)
     train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=1)
 
 
@@ -603,7 +695,7 @@ def training(args):
                 'test_loss_per_batch': {key: [] for key in configs["test"]}}
     output_configs = list(set(configs["test"] + configs["train"])) 
     for config in output_configs: 
-        test_dataset = load_dataset.my_dataset(tf, n_sample, dataset, configs=config, training=False, test_size=test_size) 
+        test_dataset = load_dataset.my_dataset(tf, n_sample, dataset, configs=config, training=False, test_size=test_size, our_labels=our_labels)
         test_dataloaders[config] = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=1)
 
     optim = torch.optim.Adam(ddpm.parameters(), lr=lrate)
@@ -620,7 +712,17 @@ def training(args):
         for x, c in pbar:
             optim.zero_grad()
             x = x.to(device)
+
+            #x = 2 * x - 1
             _c = [tmpc.to(device) for tmpc in c.values()]
+            if token_folder:
+                with torch.no_grad():
+                    #normalize x to 0-1 
+                    #x = x/x.max()
+                    emb, _, [_, _, code] = vqgan.encode(2*x-1)
+                    emb = F.pad(emb, (1, 0, 1, 0), value=0)
+                    x = emb
+            
             loss = ddpm(x, _c)
             log_dict['train_loss_per_batch'].append(loss.item())
             loss.backward()
@@ -628,7 +730,10 @@ def training(args):
             pbar.set_description(f"loss: {loss_ema:.4f}")
             optim.step()
         
-
+        if (ep + 1) % args.log_freq == 0 or ep >= (n_epoch - 5):
+            torch.save(ddpm.state_dict(), checkpoints_dir + f"ddpm_model_ep{ep}.pth")
+            print('saved model at ' + checkpoints_dir + f"ddpm_model_ep{ep}.pth")
+        
         ddpm.eval()
         with torch.no_grad():
 
@@ -636,17 +741,44 @@ def training(args):
                 for test_x, test_c in test_dataloaders[test_config]:
                     test_x = test_x.to(device)
                     _test_c = [tmptest_c.to(device) for tmptest_c in test_c.values()]
+                    if token_folder:
+                        emb_test, _, [_, _, code] = vqgan.encode(test_x*2-1)
+                        emb_test = F.pad(emb_test, (1, 0, 1, 0), value=0)
+                        test_x = emb_test
                     test_loss = ddpm(test_x, _test_c)
                     log_dict['test_loss_per_batch'][test_config].append(test_loss.item())
 
-            if (ep + 1) % args.log_freq == 0 or ep >= (n_epoch - 5): #$ or ep == 1:
+            if (ep + 1) % args.log_freq == 0 or ep >= (n_epoch - 5): 
                 for test_config in output_configs: 
                     x_real, c_gen = next(iter(test_dataloaders[test_config]))
                     x_real = x_real[:n_sample].to(device)
-                    if scheduler=="DDIM": 
-                        x_gen, x_gen_store = ddpm.sample_ddim(n_sample, c_gen, (in_channels, pixel_size, pixel_size), device)
+                    if token_folder:
+                        x_real_emb, _, [_, _, code] = vqgan.encode(x_real*2-1)
+                        x_real_emb = F.pad(x_real_emb, (1, 0, 1, 0), value=0)
+                        x_real_ae_gen = vqgan.decode(x_real_emb[...,1:,1:])
+                        x_real_ae_gen = x_real_ae_gen[0] if isinstance(x_real_ae_gen, tuple) else x_real_ae_gen
+                        x_real_ae_gen = (x_real_ae_gen + 1)/2   
+                        np.savez_compressed(save_dir + f"real_"+test_config+"_ep"+str(ep)+".npz", x_real=x_real.detach().cpu().numpy())
+                        np.savez_compressed(save_dir + f"real_ae_gen_"+test_config+"_ep"+str(ep)+".npz", x_real_ae_gen=x_real_ae_gen.detach().cpu().numpy())
+                        print('saved real image at ' + save_dir + f"real_"+test_config+"_ep"+str(ep)+".png")
+                        print('saved real ae gen image at ' + save_dir + f"real_ae_gen_"+test_config+"_ep"+str(ep)+".png")
+                        if scheduler=="DDIM":
+                            x_tok, x_gen_store = ddpm.sample_ddim(n_sample, c_gen, (in_channels, 8, 8), device)
+                            # how to remove by index the last element of x_gen F.pad(emb_test, (1, 0, 1, 0), value=0)
+                            x_gen = vqgan.decode(x_tok[...,1:,1:])
+                            x_gen = x_gen[0] if isinstance(x_gen, tuple) else x_gen  # if dino loss is included
+                            x_gen = (x_gen + 1)/2
+                        else:
+                            x_tok, x_gen_store = ddpm.sample(n_sample, c_gen, (in_channels, 8, 8), device, guide_w=guide_w)
+                            x_gen = vqgan.decode(x_tok[...,1:,1:])
+                            x_gen = x_gen[0] if isinstance(x_gen, tuple) else x_gen  # if dino loss is included
+                            x_gen = (x_gen + 1)/2
                     else:
-                        x_gen, x_gen_store = ddpm.sample(n_sample, c_gen, (in_channels, pixel_size, pixel_size), device, guide_w=0.0)
+                        if scheduler=="DDIM": 
+                            x_gen, x_gen_store = ddpm.sample_ddim(n_sample, c_gen, (in_channels, pixel_size, pixel_size), device)
+                        else:
+                            x_gen, x_gen_store = ddpm.sample(n_sample, c_gen, (in_channels, pixel_size, pixel_size), device, guide_w=guide_w)
+
                     np.savez_compressed(save_dir + f"image_"+test_config+"_ep"+str(ep)+".npz", x_gen=x_gen.detach().cpu().numpy()) 
                     print('saved image at ' + save_dir + f"image_"+test_config+"_ep"+str(ep)+".png")
 
@@ -664,4 +796,5 @@ def training(args):
 if __name__ == "__main__":
     args = parser.parse_args()
     training(args)
+
 

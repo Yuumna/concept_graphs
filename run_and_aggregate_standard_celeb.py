@@ -98,7 +98,7 @@ def process_directory(dir_path, max_epochs=60, generate_plot=False):
 
     # Run the evaluation script.
     cmd = [
-        "python", "plotting.py",
+        "python", "plotting_celebA.py",
         "--exp_dir", dir_path + "/",
         "--scale_factor", str(ipe),
     ]

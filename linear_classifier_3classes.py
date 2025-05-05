@@ -10,7 +10,7 @@ import torchvision.datasets as datasets
 from sklearn import metrics
 from sklearn import decomposition
 from sklearn import manifold
-from tqdm import trange, tqdm
+from tqdm.auto import trange, tqdm
 import matplotlib.pyplot as plt
 import numpy as np
 
@@ -20,7 +20,7 @@ import time
 import classifier_load_dataset
 import itertools
 import json
-import os
+
 
 
 class MLP(nn.Module):
@@ -53,13 +53,7 @@ def train(model, iterator, optimizer, criterion, device):
     for (x, y) in tqdm(iterator, desc="Training", leave=False):
         x = x.to(device)
         optimizer.zero_grad()
-        y = [y[key].to(device) for key in y.keys()]
         y_pred = model(x)
-        # Debugging: Print shapes and unique values of y and y_pred
-        print(f"y[0] shape: {y[0].shape}, unique values: {torch.unique(y[0])}")
-        print(f"y[1] shape: {y[1].shape}, unique values: {torch.unique(y[1])}")
-        print(f"y[2] shape: {y[2].shape}, unique values: {torch.unique(y[2])}")
-        
         loss = criterion(y_pred[0], y[0]) + criterion(y_pred[1], y[1]) + criterion(y_pred[2], y[2])
         acc = {}
         acc[0] = calculate_accuracy(y_pred[0], y[0])
@@ -93,7 +87,7 @@ def evaluate(model, iterator, criterion, device):
         for (x, y) in tqdm(iterator, desc="Evaluating", leave=False):
             x = x.to(device)
             #y = _y[key].to(device)
-            y = [y[key].to(device) for key in y.keys()]
+
             y_pred = model(x)
             loss = criterion(y_pred[0], y[0]) + criterion(y_pred[1], y[1]) + criterion(y_pred[2], y[2])
             acc = {}
@@ -143,7 +137,7 @@ if __name__ == "__main__":
     
     
     pixel_size = 28
-    n_class_color = 2 #3
+    n_class_color = 3 #3
 
     tf = transforms.Compose([transforms.Resize((pixel_size,pixel_size)), transforms.ToTensor()])
     train_dataset = classifier_load_dataset.my_dataset(tf, 5000, dataset, configs=configs, training=True, n_class_color=n_class_color)
@@ -157,23 +151,23 @@ if __name__ == "__main__":
     test_iterator = data.DataLoader(test_data, batch_size=BATCH_SIZE)
     
     
-    INPUT_DIM = pixel_size * pixel_size * 3 #4
+    INPUT_DIM = pixel_size * pixel_size * 3
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 
     #for key in ["shapes","colors","sizes"]:
     OUTPUT_DIMS = [len(properties[key]) for key in ["shapes","colors","sizes"]]
     OUTPUT_DIMS[1] = n_class_color
-    model = MLP(INPUT_DIM, OUTPUT_DIMS).to(device)
+    model = MLP(INPUT_DIM, OUTPUT_DIMS)
     optimizer = optim.Adam(model.parameters())
     criterion = nn.CrossEntropyLoss()
     #model = model.to(device)
     criterion = criterion.to(device)
     
-    EPOCHS = 200
+    EPOCHS = 10 #200
     best_valid_loss = float('inf')
     
-    for epoch in trange(EPOCHS):
+    for epoch in tqdm(range(EPOCHS)):
     
         start_time = time.monotonic()
     
@@ -182,10 +176,8 @@ if __name__ == "__main__":
     
         if valid_loss < best_valid_loss:
             best_valid_loss = valid_loss
-            save_dir = 'probes'
-            save_path = os.path.join(save_dir, 'linear-classifier_'+dataset+'_multi-class_debug.pt')
-            os.makedirs(save_dir, exist_ok=True)
-            torch.save(model.state_dict(), save_path)   
+            torch.save(model.state_dict(), 'working/linear-classifier_'+dataset+'_multi-class.pt')
+    
         end_time = time.monotonic()
     
         epoch_mins, epoch_secs = epoch_time(start_time, end_time)
