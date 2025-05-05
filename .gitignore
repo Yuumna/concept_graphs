@@ -10,3 +10,5 @@ probes/*pt
 input*
 working*
 template*
+*.png
+.ipynb_checkpoints/
